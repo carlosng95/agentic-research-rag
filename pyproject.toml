@@ -2,32 +2,35 @@
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
-
 [project]
 name = "agentic-research-rag"
-version = "0.1.0"
-description = "General-purpose agentic research assistant with hybrid retrieval, reranking, citations, conversational memory, and web fallback."
+version = "0.2.0"
+description = "General-purpose agentic research assistant built with LangChain and LangGraph, featuring hybrid retrieval, reranking, citations, conversational memory, and web fallback."
 requires-python = ">=3.11"
 
 dependencies = [
-    "numpy",
-    "openai",
+    "faiss-cpu",
+    "langchain-community>=0.4",
+    "langchain-core>=1.0",
+    "langchain-huggingface>=1.0",
+    "langchain-openai>=1.0",
+    "langchain-tavily",
+    "langchain-text-splitters>=1.0",
+    "langgraph>=1.0",
+    "pydantic>=2.0",
     "pypdf",
     "python-dotenv",
     "rank-bm25",
     "sentence-transformers",
 ]
 
-
 [project.optional-dependencies]
 dev = [
     "pytest",
 ]
 
-
 [tool.setuptools.packages.find]
 include = ["agentic_research_rag*"]
-
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

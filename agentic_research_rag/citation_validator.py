@@ -1,39 +1,126 @@
 import re
+from dataclasses import dataclass
+
+from langchain_core.documents import Document
 
 
-def extract_citations(answer: str) -> list[int]:
-    """
-    Extract SOURCE numbers cited in an answer.
-    """
+_CITATION_PATTERN = re.compile(
+    r"\[SOURCE\s+(\d+)\]"
+)
 
-    matches = re.findall(r"\[SOURCE\s+(\d+)\]", answer, flags = re.IGNORECASE)
+_SOURCE_TOKEN_PATTERN = re.compile(
+    r"\[SOURCE[^\]]*\]"
+)
 
-    return [int(match) for match in matches]
+
+@dataclass(frozen = True)
+class CitationValidationResult:
+    valid: bool
+    has_citations: bool
+    cited_source_numbers: list[int]
+    invalid_source_numbers: list[int]
+    malformed_citations: list[str]
 
 
-def validate_citations(answer: str, source_count: int) -> list[str]:
-    """
-    Validate citations against the available sources.
+def _unique_preserving_order(
+    values: list[int],
+) -> list[int]:
+    seen: set[int] = set()
+    result: list[int] = []
 
-    Returns validation flags.
-    """
+    for value in values:
+        if value in seen:
+            continue
 
-    if source_count < 0:
-        raise ValueError("source_count cannot be negative")
+        seen.add(value)
+        result.append(value)
 
-    citations = extract_citations(answer)
-    flags: list[str] = []
+    return result
 
-    if source_count > 0 and not citations:
-        flags.append("missing_citations")
 
-    invalid_citations = sorted({
-        citation
-        for citation in citations
-        if citation < 1 or citation > source_count
-    })
+def _unique_strings_preserving_order(
+    values: list[str],
+) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
 
-    for citation in invalid_citations:
-        flags.append(f"invalid_source_{citation}")
+    for value in values:
+        if value in seen:
+            continue
 
-    return flags
+        seen.add(value)
+        result.append(value)
+
+    return result
+
+
+def extract_citation_numbers(
+    answer: str,
+) -> list[int]:
+    citations = [
+        int(match)
+        for match in _CITATION_PATTERN.findall(
+            answer
+        )
+    ]
+
+    return _unique_preserving_order(
+        values = citations
+    )
+
+
+def validate_citations(
+    answer: str,
+    documents: list[Document],
+) -> CitationValidationResult:
+    cited_source_numbers = extract_citation_numbers(
+        answer = answer
+    )
+
+    invalid_source_numbers = [
+        source_number
+        for source_number in cited_source_numbers
+        if (
+            source_number < 1
+            or source_number > len(documents)
+        )
+    ]
+
+    source_tokens = _SOURCE_TOKEN_PATTERN.findall(
+        answer
+    )
+
+    malformed_citations = [
+        token
+        for token in source_tokens
+        if _CITATION_PATTERN.fullmatch(
+            token
+        ) is None
+    ]
+
+    malformed_citations = (
+        _unique_strings_preserving_order(
+            values = malformed_citations
+        )
+    )
+
+    valid = (
+        not invalid_source_numbers
+        and not malformed_citations
+    )
+
+    return CitationValidationResult(
+        valid = valid,
+        has_citations = bool(
+            cited_source_numbers
+        ),
+        cited_source_numbers = (
+            cited_source_numbers
+        ),
+        invalid_source_numbers = (
+            invalid_source_numbers
+        ),
+        malformed_citations = (
+            malformed_citations
+        ),
+    )

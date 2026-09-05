@@ -1,112 +1,105 @@
 from pathlib import Path
 
-from .agents.research_agent import ResearchAgent
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph.state import CompiledStateGraph
+
+from .chains.model import build_chat_model
+from .chains.query_rewriter import build_query_rewriter
+from .chains.rag import build_rag_chain
+from .chains.sufficiency import build_sufficiency_chain
+from .chains.synthesis import build_synthesis_chain
 from .config import Settings
-from .evaluation.sufficiency import SufficiencyEvaluator
-from .indexing.bm25_index import BM25Index
-from .indexing.semantic_index import SemanticIndex
-from .ingestion.corpus import load_corpus
-from .memory import ConversationMemory
-from .providers.embeddings import LocalEmbeddingProvider
-from .providers.llm import OpenAILLMProvider
-from .providers.websearch import OpenAIWebSearchProvider
-from .query_rewriter import QueryRewriter
-from .rag_pipeline import RAGPipeline
-from .reranking.cross_encoder import CrossEncoderReranker
-from .retrieval_pipeline import RetrievalPipeline
-from .retriever import Retriever
-from .synthesis.evidence import EvidenceSynthesizer
-from .tokenizer import RegexTokenizer
-from .tools.paper_rag import PaperRAGTool
-from .tools.websearch import WebSearchTool
-from .indexing.semantic_index_manager import load_or_build_semantic_index
+from .graph.research_graph import build_research_graph
+from .ingestion.documents import load_corpus
+from .retrieval.embeddings import build_embeddings
+from .retrieval.hybrid import build_hybrid_retriever
+from .retrieval.index_manager import (
+    load_or_build_vector_store,
+)
+from .retrieval.reranker import (
+    build_reranking_retriever,
+)
+from .tools.web_search import build_web_search_tool
 
 
-def build_research_agent(
-    papers_dir: str | Path,
-    semantic_index_path: str | Path,
-) -> ResearchAgent:
-    papers_dir = Path(papers_dir)
-    semantic_index_path = Path(semantic_index_path)
+def build_application(
+    papers_dir: str | Path = "papers",
+    index_dir: str | Path = "data/indexes/faiss",
+    settings: Settings | None = None,
+    checkpointer: BaseCheckpointSaver | None = None,
+) -> CompiledStateGraph:
+    if settings is None:
+        settings = Settings.from_env()
 
-    settings = Settings.from_env()
+    papers_dir = Path(
+        papers_dir
+    )
 
-    chunks = load_corpus(
+    index_dir = Path(
+        index_dir
+    )
+
+    documents = load_corpus(
         papers_dir = papers_dir,
         chunk_size = settings.chunk_size,
-        overlap = settings.chunk_overlap,
+        chunk_overlap = settings.chunk_overlap,
     )
 
-    embedding_provider = LocalEmbeddingProvider()
-
-    semantic_index = load_or_build_semantic_index(
-        path = semantic_index_path,
-        chunks = chunks,
-        embedding_provider = embedding_provider,
+    embeddings = build_embeddings(
+        settings = settings
     )
 
-    tokenizer = RegexTokenizer()
-
-    bm25_index = BM25Index(
-        chunks = chunks,
-        tokenizer = tokenizer,
+    vector_store = load_or_build_vector_store(
+        documents = documents,
+        embeddings = embeddings,
+        settings = settings,
+        index_dir = index_dir,
     )
 
-    retriever = Retriever(
-        semantic_index = semantic_index,
-        bm25_index = bm25_index,
-        rrf_k = settings.rrf_k,
+    hybrid_retriever = build_hybrid_retriever(
+        documents = documents,
+        vector_store = vector_store,
+        settings = settings,
     )
 
-    reranker = CrossEncoderReranker()
+    retriever = build_reranking_retriever(
+        base_retriever = hybrid_retriever,
+        settings = settings,
+    )
 
-    retrieval_pipeline = RetrievalPipeline(
+    model = build_chat_model(
+        settings = settings
+    )
+
+    query_rewriter = build_query_rewriter(
+        model = model
+    )
+
+    rag_chain = build_rag_chain(
         retriever = retriever,
-        reranker = reranker,
-        candidate_k = settings.candidate_k,
-        rerank_k = settings.rerank_k,
-        final_k = settings.final_k,
+        model = model,
     )
 
-    llm = OpenAILLMProvider()
-
-    rag_pipeline = RAGPipeline(
-        retrieval_pipeline = retrieval_pipeline,
-        llm = llm,
+    sufficiency_chain = build_sufficiency_chain(
+        model = model
     )
 
-    paper_tool = PaperRAGTool(
-        rag_pipeline = rag_pipeline,
+    synthesis_chain = build_synthesis_chain(
+        model = model
     )
 
-    web_search_provider = OpenAIWebSearchProvider()
+    web_search_tool = build_web_search_tool()
 
-    web_tool = WebSearchTool(
-        web_search_provider = web_search_provider,
-    )
+    if checkpointer is None:
+        checkpointer = InMemorySaver()
 
-    sufficiency_evaluator = SufficiencyEvaluator(
-        llm = llm,
-    )
-
-    synthesizer = EvidenceSynthesizer(
-        llm = llm,
-    )
-
-    memory = ConversationMemory(
-        max_turns = settings.memory_turns,
-    )
-
-    query_rewriter = QueryRewriter(
-        llm = llm,
-    )
-
-    return ResearchAgent(
-        paper_tool = paper_tool,
-        web_tool = web_tool,
-        sufficiency_evaluator = sufficiency_evaluator,
-        synthesizer = synthesizer,
-        memory = memory,
+    return build_research_graph(
         query_rewriter = query_rewriter,
+        rag_chain = rag_chain,
+        sufficiency_chain = sufficiency_chain,
+        web_search_tool = web_search_tool,
+        synthesis_chain = synthesis_chain,
+        memory_turns = settings.memory_turns,
+        checkpointer = checkpointer,
     )
-    

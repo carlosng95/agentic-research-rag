@@ -5,24 +5,25 @@
 papers/*.pdf
 
 # Generated indexes
-data/indexes/*.npz
+data/indexes/*
+!data/indexes/.gitkeep
 
 # Jupyter notebooks
 *.ipynb
 .ipynb_checkpoints/
-notebooks/
 
 # Python
 __pycache__/
 *.py[cod]
 .pytest_cache/
+*.egg-info/
 
 # Virtual environments
 .venv/
 venv/
 
+# IDEs
+.vscode/
+
 # macOS
 .DS_Store
-
-*.egg-info/
-.vscode/

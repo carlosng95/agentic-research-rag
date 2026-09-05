@@ -1,485 +1,420 @@
 # 🔎 Agentic Research RAG
 
-A general-purpose **agentic research assistant** for querying collections of PDF documents using **hybrid retrieval, semantic search, BM25, Reciprocal Rank Fusion, cross-encoder reranking, grounded generation, citation validation, conversational memory, and web fallback**.
+A general-purpose **agentic research assistant** for querying collections of PDF documents with **LangChain** and **LangGraph**.
 
-The system follows a **paper-first research strategy**: it always searches the local document corpus first, evaluates whether the retrieved evidence is sufficient to answer the question, and only uses web search when the local evidence is not enough.
+The system follows a **paper-first research strategy**:
 
-The project is designed as a modular, testable RAG architecture rather than a single retrieval script, with explicit abstractions for ingestion, indexing, retrieval, reranking, LLM providers, tools, memory, evidence evaluation, synthesis, and agent orchestration.
+1. rewrite context-dependent follow-up questions into standalone research queries,
+2. search the local PDF corpus first,
+3. combine semantic and lexical retrieval,
+4. rerank the strongest candidates,
+5. generate a grounded answer with citations,
+6. evaluate whether the local evidence is sufficient,
+7. use web search only when the local evidence is insufficient,
+8. synthesize local and web evidence into a final answer,
+9. validate citation structure,
+10. preserve conversational state through LangGraph checkpointing.
 
----
-
-## 📑 Table of Contents
-
-- [Key Features](#key-features)
-- [Quickstart](#-quickstart)
-- [Architecture](#architecture)
-- [Retrieval Architecture](#retrieval-architecture)
-- [Cross-Encoder Reranking](#cross-encoder-reranking)
-- [Semantic Index Persistence](#semantic-index-persistence)
-- [Document Ingestion](#document-ingestion)
-- [Grounded RAG Generation](#grounded-rag-generation)
-- [Citation Validation](#citation-validation)
-- [Evidence Sufficiency Evaluation](#evidence-sufficiency-evaluation)
-- [Paper-First Agent Strategy](#paper-first-agent-strategy)
-- [Web Search Fallback](#web-search-fallback)
-- [Evidence Synthesis](#evidence-synthesis)
-- [Conversational Memory](#conversational-memory)
-- [Context-Aware Query Rewriting](#context-aware-query-rewriting)
-- [Agent Orchestration](#agent-orchestration)
-- [Structured Responses](#structured-responses)
-- [Project Structure](#project-structure)
-- [Configuration](#configuration)
-- [Installation](#installation)
-- [Adding Documents](#adding-documents)
-- [Building the Research Agent](#building-the-research-agent)
-- [Testing](#testing)
-- [Testing Strategy](#testing-strategy)
-- [Design Principles](#design-principles)
-- [Technology Stack](#technology-stack)
-- [Current Scope](#current-scope)
-- [Known Limitations](#-known-limitations)
-- [Potential Extensions](#potential-extensions)
-- [Summary](#summary)
+The project is designed as a modular, testable research workflow rather than a single `embed → retrieve → prompt` script.
 
 ---
 
 ## Key Features
 
-* PDF ingestion with page-level metadata
-* Configurable overlapping text chunking
-* Local semantic embeddings
-* Persistent semantic vector index
-* Corpus fingerprinting and automatic index invalidation
-* BM25 lexical retrieval
-* Hybrid retrieval with Reciprocal Rank Fusion
-* Cross-encoder reranking
-* Grounded RAG generation
-* Source-level citations
-* Citation validation
-* Evidence sufficiency evaluation
-* Paper-first research workflow
-* Web search fallback
-* Multi-source evidence synthesis
-* Conversational memory
-* Context-aware query rewriting
-* Provider abstractions for LLMs, embeddings, and web search
-* Structured agent responses
-* Environment-driven configuration
-* Extensive unit test coverage
+- PDF ingestion with page-level metadata
+- LangChain `Document` as the common evidence representation
+- Recursive overlapping text splitting
+- Local Hugging Face embeddings or OpenAI embeddings
+- Persistent FAISS vector index
+- Corpus fingerprinting and automatic index invalidation
+- BM25 lexical retrieval
+- Weighted Reciprocal Rank Fusion
+- Cross-encoder reranking
+- Grounded RAG generation with `ChatPromptTemplate`
+- Structured sufficiency evaluation with Pydantic
+- Paper-first conditional routing with LangGraph
+- Tavily web-search fallback
+- Multi-source evidence synthesis
+- Unified `[SOURCE N]` citation space
+- Structural citation validation
+- Conversational memory with LangGraph `MessagesState`
+- Context-aware query rewriting
+- Public `ResearchAssistant` API
+- Environment-driven configuration
+- 86 deterministic tests
 
 ---
 
-## 🚀 Quickstart
+## Quickstart
 
 ```bash
 git clone https://github.com/carlosng95/agentic-research-rag.git
 cd agentic-research-rag
+
 python3 -m pip install -e ".[dev]"
 cp .env.example .env
 ```
 
-Set your `OPENAI_API_KEY` in `.env` before running the agent. `Settings.from_env()` reads from `os.getenv()`, so it does not load `.env` automatically — call `load_dotenv()` explicitly, as shown below.
+Add your API keys to `.env`:
 
-Drop PDFs into `papers/`, then:
+```env
+OPENAI_API_KEY=
+TAVILY_API_KEY=
+```
+
+Place your PDFs inside:
+
+```text
+papers/
+```
+
+Then run:
 
 ```python
-from pathlib import Path
-
-from dotenv import load_dotenv
-
-from agentic_research_rag.bootstrap import build_research_agent
+from agentic_research_rag import build_assistant
 
 
-load_dotenv()
-
-agent = build_research_agent(
-    papers_dir = Path.cwd() / "papers",
-    semantic_index_path = Path.cwd() / "data/indexes/semantic_index.npz",
+assistant = build_assistant(
+    thread_id = "research-session"
 )
 
-response = agent.run(
-    query = "How does hybrid retrieval improve document search?"
+response = assistant.ask(
+    "What are the main findings supported by the document collection?"
+)
+
+print(response.answer)
+
+for source in response.sources:
+    print(
+        source.source_number,
+        source.type,
+        source.ref,
+        source.locator,
+    )
+```
+
+For a follow-up question, reuse the same assistant:
+
+```python
+response = assistant.ask(
+    "How does that compare with the previous point?"
 )
 
 print(response.answer)
 ```
 
+Because the same `thread_id` is reused, LangGraph can recover the previous conversational state.
+
 ---
 
 ## Architecture
 
-The system is organized as a sequence of independent components rather than a monolithic RAG pipeline.
-
 ```mermaid
 flowchart TD
+    A[User Question] --> B[ResearchAssistant]
+    B --> C[LangGraph StateGraph]
 
-    A[User Query] --> B[Query Rewriter]
+    C --> D[Begin Turn]
+    D --> E[Query Rewriter]
 
-    B --> C[Hybrid Retriever]
+    E --> F[Paper RAG]
 
-    C --> D1[Semantic Search]
-    C --> D2[BM25 Search]
+    F --> G1[FAISS Semantic Retrieval]
+    F --> G2[BM25 Lexical Retrieval]
 
-    D1 --> E[Reciprocal Rank Fusion]
-    D2 --> E
+    G1 --> H[Weighted RRF]
+    G2 --> H
 
-    E --> F[Cross-Encoder Reranker]
+    H --> I[Cross-Encoder Reranker]
+    I --> J[Grounded Generation]
 
-    F --> G[Context Builder]
-    G --> H[RAG Prompt Builder]
-    H --> I[LLM]
+    J --> K[Structured Sufficiency Evaluation]
 
-    I --> J[Paper-based Answer]
-    J --> K[Citation Validator]
+    K -->|Sufficient| L[Finalize Paper Answer]
+    K -->|Insufficient| M[Tavily Web Search]
 
-    K --> L[Evidence Sufficiency Evaluator]
-
-    L -->|Sufficient| M[Final Response]
-
-    L -->|Insufficient| N[Web Search]
-    N --> O[Evidence Synthesizer]
-
+    M --> N[Web Documents]
+    N --> O[Evidence Synthesis]
     J --> O
-    O --> P[Citation Validator]
-    P --> M
 
-    M --> Q[Conversation Memory]
+    L --> P[Citation Validation]
+    O --> P
+
+    P --> Q[Store Assistant Message]
+    Q --> R[ResearchResponse]
 ```
 
-The high-level execution flow is:
+The routing policy is deliberately deterministic:
 
 ```text
-User query
-    ↓
-Query rewriting
-    ↓
-Semantic retrieval ──┐
-                     ├── Reciprocal Rank Fusion
-BM25 retrieval ──────┘
-    ↓
-Cross-encoder reranking
-    ↓
-Paper RAG
-    ↓
-Evidence sufficiency evaluation
-    ↓
-┌─────────────────────────────┐
-│ Is local evidence enough?   │
-└─────────────────────────────┘
-      │                  │
-     Yes                 No
-      │                  │
-      ▼                  ▼
-Final answer         Web search
-                         ↓
-                Evidence synthesis
-                         ↓
-                   Final answer
+START
+  ↓
+rewrite query
+  ↓
+paper RAG
+  ↓
+evaluate local evidence
+  ↓
+      sufficient?
+      /        \
+    yes        no
+     |          |
+ finalize     web search
+   paper         |
+     |        synthesis
+     \          /
+      \        /
+   validate citations
+          ↓
+         END
 ```
 
----
-
-## Retrieval Architecture
-
-The retrieval layer combines three different ranking mechanisms.
-
-### 1. Semantic Retrieval
-
-Documents are represented using dense embeddings generated by a configurable embedding provider.
-
-The default local embedding model is:
-
-```text
-sentence-transformers/all-MiniLM-L6-v2
-```
-
-Each chunk is embedded independently and stored in a normalized matrix.
-
-For a query \(q\), the system generates a query embedding and computes similarity against every chunk embedding.
-
-Because both query and document vectors are L2-normalized, cosine similarity becomes equivalent to a dot product:
-
-```text
-similarity(q, d) = q · d
-```
-
-This architecture is effectively a **bi-encoder retrieval system**:
-
-```text
-Query ───────► Encoder ───────► Query Vector
-                                   │
-                                   │ similarity
-                                   ▼
-Document ────► Encoder ───────► Document Vector
-```
-
-Document embeddings can therefore be computed once and reused across queries.
-
-> **Note:** `all-MiniLM-L6-v2` is English-centric. If your corpus includes non-English papers (e.g. Spanish), consider a multilingual embedding model (e.g. `paraphrase-multilingual-MiniLM-L12-v2`) — see [Known Limitations](#-known-limitations).
-
----
-
-### 2. BM25 Retrieval
-
-Semantic retrieval is complemented by lexical retrieval using **BM25**.
-
-BM25 is particularly useful when exact terminology matters, such as:
-
-* acronyms
-* technical terms
-* identifiers
-* model names
-* uncommon keywords
-* domain-specific terminology
-
-The project uses:
-
-```text
-rank-bm25
-```
-
-with a pluggable tokenizer abstraction.
-
-Two tokenizer implementations are included:
-
-```text
-RegexTokenizer
-WhitespaceTokenizer
-```
-
-The default approach uses regular-expression tokenization and lowercase normalization. Neither tokenizer applies stopword removal or stemming, so lexical recall on morphologically richer languages (e.g. Spanish) will be weaker than on English.
-
----
-
-### 3. Reciprocal Rank Fusion
-
-Semantic similarity scores and BM25 scores are not directly comparable because they belong to different scoring spaces.
-
-Instead of attempting to normalize them, the system uses **Reciprocal Rank Fusion (RRF)**.
-
-For each result at rank \(rank\):
-
-```text
-RRF score = 1 / (rrf_k + rank)
-```
-
-where `rrf_k` is the rank-smoothing constant (`RRF_K`, 60 by default) — named distinctly from `RETRIEVAL_CANDIDATE_K`, `RERANK_K`, and `FINAL_K` to avoid confusion with the other `K` values used for top-K cutoffs elsewhere in the pipeline.
-
-A document appearing in multiple rankings accumulates contributions from each ranking.
-
-Conceptually:
-
-```text
-Semantic ranking          BM25 ranking
-
-1. Chunk A               1. Chunk D
-2. Chunk B               2. Chunk A
-3. Chunk C               3. Chunk C
-       │                       │
-       └──────────┬────────────┘
-                  ▼
-         Reciprocal Rank Fusion
-                  │
-                  ▼
-              Chunk A
-              Chunk C
-              Chunk D
-              Chunk B
-```
-
-This provides a robust way to combine semantic and lexical retrieval without requiring score calibration.
-
-The default configuration is:
-
-```text
-Semantic retrieval → Top 30
-BM25 retrieval     → Top 30
-RRF fusion         → Top 20
-Cross-encoder      → Top 5
-```
-
-All values are configurable through environment variables.
-
----
-
-## Cross-Encoder Reranking
-
-The fused candidates are passed to a **cross-encoder reranker**.
-
-Unlike a bi-encoder, where query and document are encoded independently, the cross-encoder processes them together:
-
-```text
-[Query, Document]
-        │
-        ▼
- Transformer
-        │
-        ▼
-Relevance Score
-```
-
-The default model is:
-
-```text
-cross-encoder/ms-marco-MiniLM-L6-v2
-```
-
-This architecture is computationally more expensive than vector similarity, but it provides stronger relevance estimation.
-
-For that reason it is only applied to the relatively small candidate set produced by hybrid retrieval.
-
-```text
-Large corpus
-    ↓
-Fast retrieval
-    ↓
-Top candidates
-    ↓
-Expensive cross-encoder
-    ↓
-Highly relevant final context
-```
-
-This follows a common two-stage information retrieval architecture:
-
-```text
-Candidate generation → Reranking
-```
-
----
-
-## Semantic Index Persistence
-
-Generating embeddings for the entire corpus every time the application starts would be unnecessary.
-
-The semantic index can therefore be persisted as:
-
-```text
-data/indexes/semantic_index.npz
-```
-
-The persisted index contains:
-
-* embedding matrix
-* corpus fingerprint
-* embedding model identifier
-* chunk count
-
-The corpus fingerprint is generated from chunk metadata and content.
-
-When loading an existing index, the application verifies:
-
-```text
-Current corpus fingerprint
-        ==
-Stored corpus fingerprint
-```
-
-as well as:
-
-```text
-Current embedding model
-        ==
-Stored embedding model
-```
-
-If either condition fails, the index is considered stale and is rebuilt automatically.
-
-```text
-Index exists?
-     │
-     ├── No ─────► Build → Save
-     │
-     └── Yes
-          │
-          ▼
-     Validate index
-          │
-       ┌──┴──┐
-       │     │
-     Valid  Stale
-       │     │
-       ▼     ▼
-     Load   Rebuild
-```
-
-This prevents silently using embeddings generated from a different corpus or embedding model.
+There is no route from `START` directly to web search. External search is only reachable after the local-evidence evaluator returns `sufficient = False`.
 
 ---
 
 ## Document Ingestion
 
-PDF documents are loaded page by page using:
+PDFs are loaded with LangChain's `PyPDFLoader` in page mode.
 
-```text
-pypdf
-```
-
-Each page becomes a structured object:
+Each page becomes a LangChain `Document` whose metadata includes fields such as:
 
 ```python
-Page(
-    document_name = "...",
-    page_number = 1,
-    text = "...",
-)
+{
+    "source": "document.pdf",
+    "document_name": "document.pdf",
+    "page_number": 1,
+}
 ```
 
-Pages are then divided into overlapping chunks.
+Documents are then split with `RecursiveCharacterTextSplitter`.
 
 Default configuration:
 
-```text
+```env
 CHUNK_SIZE=1200
 CHUNK_OVERLAP=200
 ```
 
-For a chunk size \(C\) and overlap \(O\):
-
-```text
-step = C - O
-```
+Every resulting chunk receives a corpus-wide `chunk_id`.
 
 Conceptually:
 
 ```text
-Document text
-───────────────────────────────────────────────
-
-Chunk 1
-████████████████
-
-             Chunk 2
-             ████████████████
-
-                          Chunk 3
-                          ████████████████
+PDF
+ ↓
+page Documents
+ ↓
+RecursiveCharacterTextSplitter
+ ↓
+chunk Documents
+ ↓
+global chunk_id
 ```
 
-The overlap reduces information loss around artificial chunk boundaries.
+The project currently expects text-based PDFs. OCR for scanned or image-only documents is not included.
 
-> **Note:** chunking is character-based rather than tokenizer-aware, so the number of model tokens per chunk can vary across languages and content types — a chunk sized safely for English may run closer to the embedding model's token limit for other languages. Overlap is also page-local: it does not carry across page boundaries. Token-based chunking is a straightforward future improvement (see [Known Limitations](#-known-limitations)).
+---
 
-Chunks preserve:
+## Embeddings
 
-* global chunk identifier
-* document name
-* page number
-* text
-* optional ranking score
+The embedding backend is configurable:
 
-Chunk identifiers are global across the complete corpus.
+```env
+EMBEDDING_BACKEND=local
+```
+
+Supported values:
+
+```text
+local
+openai
+```
+
+Default local model:
+
+```text
+sentence-transformers/all-MiniLM-L6-v2
+```
+
+Default OpenAI embedding model:
+
+```text
+text-embedding-3-small
+```
+
+The local backend uses LangChain's Hugging Face embeddings integration. The OpenAI backend uses `OpenAIEmbeddings`.
+
+---
+
+## Semantic Retrieval with FAISS
+
+The semantic index is implemented with FAISS through LangChain.
+
+The current index is stored under:
+
+```text
+data/indexes/faiss/
+├── index.faiss
+├── index.pkl
+└── metadata.json
+```
+
+The vector store is built with L2-normalized vectors and Euclidean distance.
+
+For normalized vectors:
+
+```text
+||q - d||² = 2 - 2(q · d)
+```
+
+so minimizing Euclidean distance produces the same ranking as maximizing cosine similarity.
+
+### Index validation
+
+The application preserves custom index-validity logic around FAISS.
+
+`metadata.json` stores:
+
+```text
+corpus fingerprint
+embedding model identifier
+document count
+```
+
+The corpus fingerprint is computed from retrieval-relevant data:
+
+```text
+chunk_id
+source
+page_number
+page_content
+```
+
+At startup:
+
+```text
+index exists?
+    ↓
+metadata valid?
+   /       \
+ yes       no
+  |         |
+load     rebuild
+FAISS      FAISS
+```
+
+If the corpus or embedding model changes, the index is rebuilt automatically.
+
+### Security note
+
+LangChain FAISS persistence uses a pickle-backed document store. This project loads only indexes generated locally by the application.
+
+Do **not** load FAISS index directories from untrusted sources.
+
+---
+
+## BM25 Lexical Retrieval
+
+Semantic search is complemented by LangChain's `BM25Retriever`.
+
+The project applies a lightweight tokenizer:
+
+```python
+r"\b\w+\b"
+```
+
+with lowercase normalization.
+
+BM25 is useful when exact terminology matters, including:
+
+- acronyms
+- model names
+- technical terms
+- identifiers
+- uncommon keywords
+- domain-specific vocabulary
+
+The lexical layer currently does not apply stemming or stopword removal.
+
+---
+
+## Weighted Reciprocal Rank Fusion
+
+Semantic and BM25 scores live in different score spaces, so they are not directly combined.
+
+Instead, the project fuses the two rankings with weighted Reciprocal Rank Fusion:
+
+```text
+contribution = weight / (rrf_k + rank)
+```
+
+Default configuration:
+
+```env
+RRF_K=60
+SEMANTIC_WEIGHT=0.5
+BM25_WEIGHT=0.5
+RETRIEVAL_CANDIDATE_K=30
+RERANK_K=20
+FINAL_K=5
+```
+
+The default retrieval flow is:
+
+```text
+FAISS → Top 30 ───┐
+                  ├── weighted RRF → Top 20
+BM25  → Top 30 ───┘
+                         ↓
+                 Cross-Encoder
+                         ↓
+                       Top 5
+```
+
+Documents that appear in both rankings accumulate contributions from both retrieval methods.
+
+---
+
+## Cross-Encoder Reranking
+
+The fused candidates are reranked with:
+
+```text
+cross-encoder/ms-marco-MiniLM-L6-v2
+```
+
+A bi-encoder compares independently generated vectors:
+
+```text
+query → encoder → query vector
+                       \
+                        similarity
+                       /
+document → encoder → document vector
+```
+
+The cross-encoder instead scores each pair jointly:
+
+```text
+(query, document)
+        ↓
+  cross-encoder
+        ↓
+ relevance score
+```
+
+This is more expensive, so it is only applied to the fused candidate set rather than the entire corpus.
 
 ---
 
 ## Grounded RAG Generation
 
-After reranking, the highest-ranked chunks are converted into an explicit context format:
+The final local documents are formatted into an explicit evidence context:
 
 ```text
 [SOURCE 1]
-
-Document: example.pdf
+Document: document.pdf
 Page: 4
 Chunk ID: 37
 
@@ -488,7 +423,6 @@ Retrieved evidence...
 ---
 
 [SOURCE 2]
-
 Document: another_document.pdf
 Page: 9
 Chunk ID: 104
@@ -496,369 +430,410 @@ Chunk ID: 104
 Retrieved evidence...
 ```
 
-The LLM is instructed to:
+The RAG chain is composed with LangChain:
 
-* answer only using the provided evidence
-* avoid unsupported external knowledge
-* explicitly acknowledge insufficient context
-* cite evidence using `[SOURCE N]`
-* avoid inventing citations
-* produce concise research-oriented answers
+```text
+Retriever
+   ↓
+Document[]
+   ↓
+context formatting
+   ↓
+ChatPromptTemplate
+   ↓
+ChatOpenAI
+   ↓
+StrOutputParser
+```
 
-The result is then converted into a structured `ResearchResponse`.
+The prompt instructs the model to:
+
+- answer only from the supplied evidence,
+- avoid unsupported external knowledge,
+- use `[SOURCE N]` citations,
+- never invent source numbers,
+- explicitly acknowledge insufficient evidence.
+
+If retrieval returns no documents, the chain skips the LLM call and returns a deterministic fallback response.
+
+---
+
+## Structured Evidence Sufficiency
+
+After the local RAG answer is generated, a separate evaluator decides whether the local evidence is sufficient.
+
+The evaluator receives:
+
+```text
+standalone question
++
+current local answer
++
+retrieved local evidence
+```
+
+It uses Pydantic structured output:
+
+```python
+class SufficiencyResult(BaseModel):
+    sufficient: bool
+```
+
+This avoids fragile string parsing such as:
+
+```text
+"SUFFICIENT"
+"INSUFFICIENT"
+```
+
+The boolean directly controls the LangGraph conditional edge.
+
+If no local documents exist, the evaluator returns `sufficient = False` without calling the LLM.
+
+---
+
+## Paper-First Routing with LangGraph
+
+The research workflow is represented explicitly with a `StateGraph`.
+
+The core policy is:
+
+```text
+local documents first
+        ↓
+evaluate evidence
+        ↓
+web only if required
+```
+
+This constraint is encoded in graph topology rather than left to an unconstrained agent prompt.
+
+Conceptually:
+
+```text
+evaluate
+   ↓
+sufficient == True  ───→ finalize_paper
+
+sufficient == False ───→ web_search
+```
+
+This makes the workflow agentic while keeping tool execution deterministic and auditable.
+
+---
+
+## Web Search Fallback
+
+When local evidence is insufficient, the graph invokes Tavily through the LangChain `TavilySearch` integration.
+
+The search layer requests structured search evidence rather than a generated final answer.
+
+Each result is normalized into the same LangChain `Document` abstraction used by the local corpus:
+
+```python
+Document(
+    page_content = "Relevant web evidence...",
+    metadata = {
+        "source": "https://example.com/article",
+        "url": "https://example.com/article",
+        "title": "Article title",
+        "web_rank": 1,
+        "search_score": 0.91,
+    },
+)
+```
+
+This produces one evidence type throughout the rest of the application:
+
+```text
+local retrieval → Document[]
+web search      → Document[]
+```
+
+Duplicate web URLs are removed.
+
+---
+
+## Evidence Synthesis
+
+When web fallback is required, local evidence is retained.
+
+The synthesis chain receives:
+
+```text
+paper_documents
++
+web_documents
+```
+
+rather than treating previously generated answers as evidence.
+
+This avoids propagating unsupported text from an earlier generation step.
+
+The final context uses a unified source-numbering space:
+
+```text
+SOURCE 1..N     → local documents
+SOURCE N+1..M   → web documents
+```
+
+The synthesis prompt instructs the model to:
+
+- prefer direct local evidence when it is sufficient,
+- use web evidence to fill missing information,
+- cite all factual claims,
+- describe disagreements between sources explicitly,
+- avoid unsupported external knowledge.
 
 ---
 
 ## Citation Validation
 
-Generated answers are automatically checked for citation consistency.
+The final answer is checked by a custom structural citation validator.
 
-The validator extracts citations such as:
+It extracts citations such as:
 
 ```text
 [SOURCE 1]
 [SOURCE 3]
 ```
 
-and verifies that they correspond to sources that actually exist in the generated context.
+and verifies that:
 
-Possible flags include:
+- each citation is well formed,
+- source numbers start at 1,
+- every cited source exists in the final evidence set.
 
-```text
-missing_citations
-invalid_source_8
-```
-
-For example, if the context contains only:
+Examples:
 
 ```text
-SOURCE 1
-SOURCE 2
-SOURCE 3
+[SOURCE 1]     valid format
+[SOURCE 12]    valid format
+
+[SOURCE 0]     invalid source number
+[SOURCE abc]   malformed
+[SOURCE 99]    invalid if only five sources exist
 ```
 
-but the model generates:
+The validator distinguishes:
 
 ```text
-[SOURCE 8]
+valid citations
+citations present
+invalid source numbers
+malformed citation tokens
 ```
 
-the response is flagged as:
+This is **structural validation, not semantic entailment**.
 
-```text
-invalid_source_8
-```
-
-This provides a lightweight guard against citation hallucination. It is **structural, not semantic** — it confirms a cited source exists, not that the source actually supports the claim attributed to it. See [Known Limitations](#-known-limitations).
-
----
-
-## Evidence Sufficiency Evaluation
-
-Retrieving documents does not necessarily mean that those documents are sufficient to answer the question.
-
-After the paper-based RAG response is generated, a dedicated evaluator determines whether the available evidence is sufficient.
-
-The evaluator receives:
-
-```text
-User question
-+
-Retrieved evidence
-```
-
-and produces one of two decisions:
-
-```text
-SUFFICIENT
-```
-
-or:
-
-```text
-INSUFFICIENT
-```
-
-If no sources were retrieved, the evaluator immediately returns insufficient without invoking the LLM.
-
-This decision controls whether external research is necessary.
-
-> **Cost note:** as implemented, this is a separate LLM call from the answer-generation step. It can be folded into the same call (have the generation prompt also return a `sufficient` field as structured output) to cut one round-trip per query in the common case where local evidence is enough.
-
----
-
-## Paper-First Agent Strategy
-
-A central design decision in this project is that **web search is not the primary retrieval mechanism**.
-
-The agent always searches the local document corpus first.
-
-```text
-Query
-  ↓
-Local documents
-  ↓
-Evidence evaluation
-```
-
-Only when the evidence is insufficient does the agent execute:
-
-```text
-Web search
-```
-
-This produces the following agent loop:
-
-```text
-Action: search local documents
-        ↓
-Observation: retrieved evidence
-        ↓
-Decision: is evidence sufficient?
-        │
-    ┌───┴────┐
-    │        │
-   Yes       No
-    │        │
-    ▼        ▼
- Answer   Action: web search
-             ↓
-         Observation
-             ↓
-          Synthesis
-```
-
-This makes the system agentic without requiring unrestricted autonomous tool execution.
-
----
-
-## Web Search Fallback
-
-When local evidence is insufficient, the research agent can invoke a web search provider.
-
-The default implementation uses the OpenAI Responses API with the built-in:
-
-```text
-web_search
-```
-
-tool.
-
-The web provider returns:
-
-```python
-answer: str
-sources: list[Source]
-```
-
-Web citations are converted to the same `Source` abstraction used by local documents.
-
-This means downstream components do not need separate data structures for local and web evidence.
-
----
-
-## Evidence Synthesis
-
-When web fallback is required, the original paper evidence is **not discarded**.
-
-Instead, both evidence sets are passed to the `EvidenceSynthesizer`:
-
-```text
-Paper evidence ────┐
-                   ├──► Evidence Synthesizer
-Web evidence ──────┘
-```
-
-The synthesizer:
-
-1. combines paper and web sources
-2. removes duplicate sources
-3. renumbers sources into a unified citation space
-4. prefers direct document evidence when appropriate
-5. uses web evidence to complement missing information
-6. generates a new grounded answer
-7. validates the final citations
-
-This prevents the web fallback from replacing useful evidence already found in the local corpus.
+A real source can still be cited next to a claim it does not support. Claim-level entailment verification is a possible future extension.
 
 ---
 
 ## Conversational Memory
 
-The system supports multi-turn research conversations.
+The graph state inherits from LangGraph `MessagesState`.
 
-Conversation history is stored as structured turns:
-
-```python
-Turn(
-    role = "user",
-    content = "...",
-)
-```
-
-and:
-
-```python
-Turn(
-    role = "assistant",
-    content = "...",
-)
-```
-
-Memory has a configurable maximum number of turns:
+Conversation messages therefore use LangChain message objects:
 
 ```text
+HumanMessage
+AIMessage
+```
+
+rather than a custom turn abstraction.
+
+At the end of each request:
+
+```text
+HumanMessage(current question)
++
+AIMessage(final answer)
+```
+
+become part of the graph state.
+
+The default bootstrap uses:
+
+```python
+InMemorySaver()
+```
+
+as the checkpointer.
+
+A conversation is identified by `thread_id`.
+
+```python
+assistant = build_assistant(
+    thread_id = "conversation-a"
+)
+```
+
+Calling:
+
+```python
+assistant.ask("First question")
+assistant.ask("Follow-up question")
+```
+
+reuses the same conversation state.
+
+### Memory window
+
+```env
 MEMORY_TURNS=5
 ```
 
-Older messages are automatically removed once the configured history window is exceeded.
+controls how much prior history is provided to the query rewriter.
 
-Memory is not just an append-only log — it feeds back into the next turn:
+`InMemorySaver` is process-local. Conversation state is lost when the Python process exits.
 
-```text
-Turn N
-  ↓
-Final response saved to memory
-  ↓
-Turn N+1 arrives
-  ↓
-Query Rewriter reads memory ──► standalone query for retrieval
-```
-
-This is what makes the [Context-Aware Query Rewriting](#context-aware-query-rewriting) step below possible: without this feedback loop, the rewriter would have no prior context to resolve ambiguous follow-ups against.
+A persistent checkpointer should be used for production deployments.
 
 ---
 
 ## Context-Aware Query Rewriting
 
-Follow-up questions frequently depend on previous conversation context.
+Follow-up questions can contain unresolved references.
 
-For example:
+Example:
 
 ```text
 User:
-How does semantic search retrieve documents?
+How does semantic retrieval work?
 
 Assistant:
 ...
 
 User:
-And how does it differ from lexical search?
+How does it differ from lexical retrieval?
 ```
 
-The second query alone is ambiguous.
+The latest question alone is ambiguous.
 
-Before retrieval, the query rewriter converts it into a standalone research query such as:
+Before retrieval, the query-rewrite chain receives previous `HumanMessage` and `AIMessage` objects through a `MessagesPlaceholder` and can produce a standalone query such as:
 
 ```text
-How does semantic search differ from lexical document retrieval?
+How does semantic retrieval differ from lexical retrieval?
 ```
 
-The rewritten query is used for retrieval, while the **original user message** is stored in conversation memory.
+The original user question remains unchanged in conversation history.
 
-This separates:
-
-```text
-Conversation representation
-```
-
-from:
-
-```text
-Retrieval representation
-```
-
-If no conversation history exists, the query is returned unchanged and no additional LLM call is made.
+If there is no previous history, the query is returned unchanged and the LLM is not called.
 
 ---
 
-## Agent Orchestration
+## LangGraph State
 
-`ResearchAgent` coordinates the complete workflow:
+The workflow state includes fields such as:
 
-```python
-standalone_query = query_rewriter.rewrite(...)
+```text
+messages
+question
+standalone_query
 
-paper_response = paper_tool.run(
-    query = standalone_query,
-)
+paper_documents
+paper_answer
+sufficient
 
-sufficient = sufficiency_evaluator.is_sufficient(
-    query = standalone_query,
-    response = paper_response,
-)
+web_documents
 
-if sufficient:
-    final_response = paper_response
-else:
-    web_response = web_tool.run(
-        query = standalone_query,
-    )
+final_documents
+final_answer
 
-    final_response = synthesizer.synthesize(
-        query = standalone_query,
-        paper_response = paper_response,
-        web_response = web_response,
-    )
+citation_valid
+citation_has_citations
+cited_source_numbers
+invalid_source_numbers
+malformed_citations
+
+tools_used
+flags
 ```
 
-The agent also records which tools were actually executed:
+Nodes return partial state updates.
 
-```python
-tools_used = [
-    "paper_search",
-]
+For example:
+
+```text
+rewrite_query
+    → standalone_query
+
+paper_rag
+    → paper_documents
+    → paper_answer
+
+evaluate
+    → sufficient
+
+web_search
+    → web_documents
+
+synthesize
+    → final_documents
+    → final_answer
 ```
 
-or:
-
-```python
-tools_used = [
-    "paper_search",
-    "web_search",
-]
-```
-
-This makes execution behavior observable without exposing internal model reasoning.
+`messages` uses LangGraph's message reducer so conversation messages accumulate rather than being overwritten.
 
 ---
 
-## Structured Responses
+## Structured Public API
 
-The application returns a structured response instead of only raw text.
+The public API hides the internal LangGraph state.
 
 ```python
-@dataclass
-class ResearchResponse:
-    answer: str
-    sources: list[Source]
-    reasoning_steps: list[str]
-    tools_used: list[str]
-    confidence: float
-    flags: list[str]
+from agentic_research_rag import build_assistant
+
+
+assistant = build_assistant(
+    thread_id = "demo"
+)
+
+response = assistant.ask(
+    "What conclusions are supported by the documents?"
+)
 ```
 
-Example:
+The returned object is a Pydantic model:
 
 ```python
 ResearchResponse(
     answer = "...",
     sources = [...],
-    reasoning_steps = [
-        "Retrieved and reranked document chunks.",
-        "Generated the answer using retrieved context.",
-    ],
-    tools_used = [
-        "paper_search",
-    ],
-    confidence = 0.0,
+    cited_source_numbers = [1, 3],
+    tools_used = ["paper_retrieval"],
     flags = [],
+    paper_evidence_sufficient = True,
+    citation_valid = True,
 )
 ```
 
-`reasoning_steps` represent an **operational execution trace**, not hidden model chain-of-thought.
+Each source is represented as:
 
-The current implementation intentionally does not treat cross-encoder relevance scores as calibrated probabilities, so `confidence` is hardcoded to `0.0` and not derived from anything yet.
+```python
+Source(
+    source_number = 1,
+    type = "paper",
+    ref = "document.pdf",
+    locator = "page 4",
+    snippet = "...",
+)
+```
+
+or:
+
+```python
+Source(
+    source_number = 6,
+    type = "web",
+    ref = "https://example.com/article",
+    locator = "https://example.com/article",
+    snippet = "...",
+)
+```
+
+The application deliberately does not expose a fabricated confidence score.
 
 ---
 
@@ -868,78 +843,58 @@ The current implementation intentionally does not treat cross-encoder relevance 
 agentic-research-rag/
 │
 ├── agentic_research_rag/
-│   ├── agents/
-│   │   └── research_agent.py
-│   │
-│   ├── evaluation/
-│   │   └── sufficiency.py
-│   │
-│   ├── fusion/
-│   │   └── rrf.py
-│   │
-│   ├── indexing/
-│   │   ├── bm25_index.py
-│   │   ├── semantic_index.py
-│   │   └── semantic_index_manager.py
-│   │
-│   ├── ingestion/
-│   │   ├── chunker.py
-│   │   ├── corpus.py
-│   │   └── pdf_loader.py
-│   │
-│   ├── providers/
-│   │   ├── embeddings.py
-│   │   ├── llm.py
-│   │   └── websearch.py
-│   │
-│   ├── reranking/
-│   │   ├── base.py
-│   │   └── cross_encoder.py
-│   │
-│   ├── synthesis/
-│   │   └── evidence.py
-│   │
-│   ├── tools/
-│   │   ├── base.py
-│   │   ├── paper_rag.py
-│   │   └── websearch.py
-│   │
+│   ├── __init__.py
+│   ├── assistant.py
 │   ├── bootstrap.py
 │   ├── citation_validator.py
 │   ├── config.py
-│   ├── context_builder.py
-│   ├── memory.py
-│   ├── prompt_builder.py
-│   ├── query_rewriter.py
-│   ├── rag_pipeline.py
-│   ├── retrieval_pipeline.py
-│   ├── retriever.py
-│   ├── tokenizer.py
-│   └── types.py
+│   │
+│   ├── chains/
+│   │   ├── __init__.py
+│   │   ├── model.py
+│   │   ├── query_rewriter.py
+│   │   ├── rag.py
+│   │   ├── sufficiency.py
+│   │   └── synthesis.py
+│   │
+│   ├── graph/
+│   │   ├── __init__.py
+│   │   ├── research_graph.py
+│   │   └── state.py
+│   │
+│   ├── ingestion/
+│   │   ├── __init__.py
+│   │   └── documents.py
+│   │
+│   ├── retrieval/
+│   │   ├── __init__.py
+│   │   ├── embeddings.py
+│   │   ├── hybrid.py
+│   │   ├── index_manager.py
+│   │   └── reranker.py
+│   │
+│   └── tools/
+│       ├── __init__.py
+│       └── web_search.py
 │
 ├── tests/
-│   ├── fakes.py
-│   ├── test_bm25_index.py
-│   ├── test_chunker.py
+│   ├── test_assistant.py
+│   ├── test_bootstrap.py
 │   ├── test_citation_validator.py
 │   ├── test_config.py
-│   ├── test_context_builder.py
-│   ├── test_corpus.py
-│   ├── test_cross_encoder.py
-│   ├── test_evidence_synthesizer.py
-│   ├── test_memory.py
-│   ├── test_pdf_loader.py
-│   ├── test_prompt_builder.py
-│   ├── test_query_rewriter.py
-│   ├── test_rag_pipeline.py
-│   ├── test_research_agent.py
-│   ├── test_retrieval_pipeline.py
-│   ├── test_retriever.py
-│   ├── test_rrf.py
-│   ├── test_semantic_index.py
-│   ├── test_semantic_index_manager.py
-│   ├── test_sufficiency.py
-│   └── test_tokenizer.py
+│   ├── test_documents.py
+│   ├── test_embeddings.py
+│   ├── test_graph_state.py
+│   ├── test_hybrid.py
+│   ├── test_index_manager.py
+│   ├── test_model.py
+│   ├── test_query_rewriter_chain.py
+│   ├── test_rag_chain.py
+│   ├── test_reranker_langchain.py
+│   ├── test_research_graph.py
+│   ├── test_sufficiency_chain.py
+│   ├── test_synthesis_chain.py
+│   └── test_web_search.py
 │
 ├── papers/
 │   └── .gitkeep
@@ -954,411 +909,348 @@ agentic-research-rag/
 └── README.md
 ```
 
-PDF documents, generated indexes, development notebooks, secrets, and local IDE artifacts are intentionally excluded from version control.
+Local PDFs, generated FAISS indexes, secrets, notebooks, caches, and IDE artifacts are excluded from version control.
 
 ---
 
 ## Configuration
 
-Create a local `.env` file based on:
+Create `.env` from the template:
 
-```text
-.env.example
+```bash
+cp .env.example .env
 ```
 
-Example:
+Current configuration:
 
 ```env
+# OpenAI
 OPENAI_API_KEY=
 
+# Tavily
+TAVILY_API_KEY=
+
+# Embeddings
+EMBEDDING_BACKEND=local
 LOCAL_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
-CROSS_ENCODER_MODEL=cross-encoder/ms-marco-MiniLM-L6-v2
-LLM_MODEL=gpt-4o-mini
 
+# Reranking
+CROSS_ENCODER_MODEL=cross-encoder/ms-marco-MiniLM-L6-v2
+
+# LLM
+LLM_MODEL=gpt-4o-mini
+LLM_TEMPERATURE=0.0
+
+# Document ingestion
 CHUNK_SIZE=1200
 CHUNK_OVERLAP=200
 
+# Hybrid retrieval
 RRF_K=60
-
+SEMANTIC_WEIGHT=0.5
+BM25_WEIGHT=0.5
 RETRIEVAL_CANDIDATE_K=30
+
+# Reranking
 RERANK_K=20
 FINAL_K=5
 
+# Conversation memory
 MEMORY_TURNS=5
 ```
 
-Configuration is loaded into an immutable `Settings` dataclass and validated at startup.
+`Settings.from_env()` loads `.env` automatically and validates the configuration.
 
 Examples of invalid configurations include:
 
 ```text
 CHUNK_OVERLAP >= CHUNK_SIZE
 
-RERANK_K > RETRIEVAL_CANDIDATE_K
+unsupported EMBEDDING_BACKEND
+
+SEMANTIC_WEIGHT < 0
+
+BM25_WEIGHT < 0
+
+SEMANTIC_WEIGHT == 0
+and
+BM25_WEIGHT == 0
+
+RERANK_K > combined retrieval candidates
 
 FINAL_K > RERANK_K
-```
 
-These conditions fail early instead of producing unexpected runtime behavior.
-
----
-
-## Installation
-
-Clone the repository:
-
-```bash
-git clone https://github.com/carlosng95/agentic-research-rag.git
-cd agentic-research-rag
-```
-
-Create and activate a Python environment, then install the project in editable mode:
-
-```bash
-python3 -m pip install -e ".[dev]"
-```
-
-The project requires Python:
-
-```text
->= 3.11
+LLM_TEMPERATURE outside [0, 2]
 ```
 
 ---
 
-## Adding Documents
+## Building the Application
 
-Place PDF documents inside:
-
-```text
-papers/
-```
-
-For example:
-
-```text
-papers/
-├── document_1.pdf
-├── document_2.pdf
-└── document_3.pdf
-```
-
-PDF files are intentionally ignored by Git so users can supply their own document corpus.
-
-The semantic index is created automatically and stored under:
-
-```text
-data/indexes/
-```
-
-Generated indexes are also excluded from version control.
-
----
-
-## Building the Research Agent
-
-The complete application is assembled through the composition root in:
+The composition root is:
 
 ```text
 agentic_research_rag/bootstrap.py
 ```
 
-Example:
-
-```python
-from pathlib import Path
-
-from agentic_research_rag.bootstrap import build_research_agent
-
-
-PROJECT_ROOT = Path.cwd()
-
-agent = build_research_agent(
-    papers_dir = PROJECT_ROOT / "papers",
-    semantic_index_path = PROJECT_ROOT / "data/indexes/semantic_index.npz",
-)
-```
-
-Then run a research query:
-
-```python
-response = agent.run(
-    query = "How does hybrid retrieval improve document search?"
-)
-
-print(response.answer)
-```
-
-Inspect sources:
-
-```python
-for source in response.sources:
-    print(
-        source.type,
-        source.ref,
-        source.locator,
-    )
-```
-
-Inspect executed tools:
-
-```python
-print(response.tools_used)
-```
-
-Possible result:
+It wires together:
 
 ```text
-['paper_search']
+Settings
+ ↓
+Document ingestion
+ ↓
+Embeddings
+ ↓
+FAISS index
+ ↓
+HybridRetriever
+ ↓
+Cross-encoder reranker
+ ↓
+ChatOpenAI
+ ↓
+RAG / rewrite / sufficiency / synthesis chains
+ ↓
+TavilySearch
+ ↓
+LangGraph
 ```
 
-or, when local evidence is insufficient:
+Low-level graph access:
 
-```text
-['paper_search', 'web_search']
+```python
+from agentic_research_rag import build_application
+
+
+graph = build_application()
+
+result = graph.invoke(
+    {
+        "question": "Research question",
+        "messages": [],
+    },
+    config = {
+        "configurable": {
+            "thread_id": "demo"
+        }
+    },
+)
+
+print(result["final_answer"])
 ```
+
+For normal use, prefer `build_assistant()`.
 
 ---
 
 ## Testing
 
-The project contains an extensive unit test suite covering the main architecture.
-
-Run all tests with:
+Install development dependencies:
 
 ```bash
-python3 -m pytest
+python3 -m pip install -e ".[dev]"
+```
+
+Check the environment:
+
+```bash
+python3 -m pip check
+```
+
+Run the complete suite:
+
+```bash
+python3 -m pytest -v
 ```
 
 Current suite:
 
 ```text
-164 passed
+86 passed
 ```
 
 The tests cover:
 
-* configuration validation
-* PDF loading
-* document chunking
-* global chunk IDs
-* tokenization
-* BM25 indexing
-* semantic index construction
-* embedding normalization
-* semantic search
-* semantic index persistence
-* corpus fingerprint validation
-* embedding model mismatch detection
-* automatic index rebuilding
-* Reciprocal Rank Fusion
-* hybrid retrieval
-* cross-encoder reranking
-* context construction
-* prompt construction
-* citation extraction
-* citation validation
-* RAG orchestration
-* conversation memory
-* query rewriting
-* evidence sufficiency
-* evidence synthesis
-* research agent control flow
-* web fallback behavior
+- configuration validation
+- document splitting and metadata preservation
+- corpus validation
+- embedding factories
+- FAISS construction and persistence
+- corpus fingerprint invalidation
+- embedding-model invalidation
+- semantic retrieval
+- BM25 tokenization
+- hybrid retrieval
+- weighted RRF behavior
+- cross-encoder reranking
+- RAG context formatting
+- grounded RAG control flow
+- structured sufficiency evaluation
+- context-aware query rewriting
+- web result normalization
+- evidence synthesis
+- citation validation
+- LangGraph state reducers
+- conditional graph routing
+- conversation checkpointing
+- application bootstrap wiring
+- public `ResearchAssistant` behavior
 
-External models and APIs are replaced with deterministic test doubles where appropriate, allowing most application logic to be tested without network calls or model downloads.
-
----
-
-## Testing Strategy
-
-The test architecture intentionally separates application logic from external dependencies.
-
-For example:
-
-```text
-Real LLM Provider
-       ▲
-       │ abstraction
-       ▼
-Fake LLM Provider
-```
-
-The fake provider records prompts and returns deterministic responses.
-
-This makes it possible to test behaviors such as:
-
-```text
-Query rewriting
-Citation validation
-Evidence sufficiency
-Agent routing
-Evidence synthesis
-```
-
-without relying on:
-
-```text
-OpenAI API availability
-network access
-model randomness
-external model downloads
-```
-
-The same strategy is used for:
-
-* embedding providers
-* semantic indexes
-* BM25 indexes
-* retrievers
-* rerankers
-* web tools
-
-This keeps the unit test suite fast and deterministic.
+External services and large models are replaced with deterministic test doubles where appropriate, keeping the unit suite fast and network-independent.
 
 ---
 
 ## Design Principles
 
-### Modular Components
+### Framework primitives for generic infrastructure
 
-Each component has one primary responsibility.
+Generic infrastructure relies on LangChain and LangGraph abstractions:
 
 ```text
-PDF Loader      → document extraction
-Chunker         → text segmentation
-Semantic Index  → vector retrieval
-BM25 Index      → lexical retrieval
-RRF             → rank fusion
-Reranker        → relevance refinement
-RAG Pipeline    → grounded generation
-Evaluator       → evidence sufficiency
-Synthesizer     → multi-source generation
-Research Agent  → workflow orchestration
+Document
+Embeddings
+BaseRetriever
+BaseCrossEncoder
+BaseChatModel
+ChatPromptTemplate
+Runnable
+BaseTool
+MessagesState
+StateGraph
+checkpointing
 ```
 
----
+### Custom logic for application-specific behavior
 
-### Dependency Injection
+The project retains custom code where the behavior is specific to this application:
 
-Core components receive their dependencies through constructors.
+```text
+corpus fingerprinting
+index invalidation
+weighted rank fusion
+source normalization
+citation syntax validation
+paper-first routing policy
+```
 
-For example:
+The goal is not to use a framework in every function. The goal is to use framework abstractions where they reduce boilerplate without hiding application-specific decisions.
 
-```python
-RetrievalPipeline(
-    retriever = retriever,
-    reranker = reranker,
-    candidate_k = 30,
-    rerank_k = 20,
-    final_k = 5,
+### Dependency injection
+
+Factories and builders accept their dependencies explicitly.
+
+Examples:
+
+```text
+build_rag_chain(retriever, model)
+
+build_research_graph(
+    query_rewriter,
+    rag_chain,
+    sufficiency_chain,
+    web_search_tool,
+    synthesis_chain,
 )
 ```
 
-This makes implementations replaceable and significantly improves testability.
+This keeps components independently testable.
 
----
+### Paper-first research
 
-### Provider Abstractions
+Local evidence is always attempted before external search.
 
-External services are hidden behind interfaces such as:
+The rule is enforced by graph topology rather than model discretion.
+
+### Explicit grounding
+
+Evidence remains represented as `Document` objects through retrieval, reranking, generation, synthesis, and response construction.
+
+### Observable execution without chain-of-thought
+
+The public response can expose:
 
 ```text
-EmbeddingProvider
-LLMProvider
-WebSearchProvider
-Reranker
-Tokenizer
-Tool
+tools_used
+flags
+paper_evidence_sufficient
+citation_valid
 ```
 
-Business logic therefore does not depend directly on a specific model vendor or implementation.
-
----
-
-### Fail Fast Configuration
-
-Configuration errors are validated during initialization rather than appearing later during query execution.
-
----
-
-### Immutable Retrieval Results
-
-Search components use `dataclasses.replace()` when assigning ranking scores instead of mutating the original corpus chunks.
-
-This keeps the underlying corpus stable across multiple retrieval stages.
-
----
-
-### Paper-First Research
-
-Local evidence remains the primary source of truth.
-
-Web search is treated as a fallback mechanism instead of an unconditional retrieval source.
-
----
-
-### Explicit Grounding
-
-Sources are represented explicitly and propagated through the entire generation pipeline.
-
-This allows citations to be validated after generation.
+These describe observable workflow behavior, not private model reasoning.
 
 ---
 
 ## Technology Stack
 
-| Layer                   | Technology                  |
-| ----------------------- | --------------------------- |
-| Language                | Python 3.11+                |
-| PDF ingestion           | pypdf                       |
-| Semantic embeddings     | Sentence Transformers       |
-| Default embedding model | all-MiniLM-L6-v2            |
-| Lexical retrieval       | BM25                        |
-| Rank fusion             | Reciprocal Rank Fusion      |
-| Reranking               | Cross-Encoder               |
-| Default reranker        | ms-marco-MiniLM-L6-v2       |
-| LLM integration         | OpenAI Responses API        |
-| Web research            | OpenAI Web Search           |
-| Vector operations       | NumPy                       |
-| Configuration           | python-dotenv               |
-| Testing                 | pytest                      |
-| Packaging               | setuptools / pyproject.toml |
+| Layer | Technology |
+| --- | --- |
+| Language | Python 3.11+ |
+| Agent orchestration | LangGraph |
+| LLM abstraction | LangChain Core |
+| LLM | ChatOpenAI |
+| Prompt composition | ChatPromptTemplate / LCEL |
+| Structured output | Pydantic |
+| PDF ingestion | PyPDFLoader / pypdf |
+| Text splitting | RecursiveCharacterTextSplitter |
+| Local embeddings | Hugging Face / Sentence Transformers |
+| Optional embeddings | OpenAIEmbeddings |
+| Vector retrieval | FAISS |
+| Lexical retrieval | BM25 |
+| Rank fusion | Weighted Reciprocal Rank Fusion |
+| Reranking | Hugging Face Cross-Encoder |
+| Web search | Tavily |
+| Conversational state | MessagesState |
+| Checkpointing | InMemorySaver by default |
+| Configuration | python-dotenv |
+| Testing | pytest |
+| Packaging | setuptools / pyproject.toml |
 
 ---
 
 ## Current Scope
 
-The project currently focuses on the core research and retrieval architecture.
+The project currently focuses on the research workflow itself.
 
-It intentionally does not depend on:
+It intentionally does not include:
 
-* a web framework
-* a frontend
-* a database server
-* a dedicated vector database
-* an orchestration framework
+- a web frontend
+- a REST API
+- authentication
+- a database server
+- distributed task execution
+- production-grade persistent conversation storage
+- OCR
+- automated RAG quality evaluation
 
-For small and medium document collections, the semantic index currently uses a normalized NumPy matrix.
-
-This keeps the retrieval implementation transparent and easy to inspect.
-
-For substantially larger corpora, the semantic retrieval layer could be replaced with an approximate nearest-neighbor backend such as FAISS or a dedicated vector database without changing the higher-level agent architecture.
+FAISS keeps local semantic retrieval lightweight while providing a cleaner vector-store abstraction than a hand-managed embedding matrix.
 
 ---
 
-## ⚠️ Known Limitations
+## Known Limitations
 
-These are current, deliberate trade-offs rather than bugs — worth knowing before relying on the system in production:
+- **Citation validation is structural, not semantic.** `[SOURCE N]` is checked for existence and format, but the validator does not prove that the source entails the claim.
 
-* **Citation validation is structural, not semantic.** A cited `[SOURCE N]` is checked for existence, not for whether it actually supports the claim next to it. Hallucinated claims attached to a real, existing source will pass validation.
-* **`confidence` is not calibrated and is currently always `0.0`.** Don't use it for filtering or ranking answers yet.
-* **Chunking is character-based.** Chunk boundaries are based on character counts rather than the embedding model's tokenizer, so token counts can vary across languages and content types. Overlap is also page-local — it does not carry across page boundaries.
-* **BM25 tokenization has no stopword removal or stemming.** Lexical recall will be weaker for morphologically rich languages (e.g. Spanish, German) than for English.
-* **PDF extraction is text-only.** Scanned or image-only PDFs require OCR, which is not currently included. Complex or multi-column layouts may also reduce text extraction quality.
-* **Per-query LLM call count can reach 4–5** (rewrite, generate, sufficiency check, web search, synthesis) in the worst case. At scale this is a real latency/cost driver worth optimizing before the "REST API layer" extension below.
-* **No rate limiting or concurrency control** around the LLM/embedding/web-search providers — fine for single-user/local use, a gap for multi-user deployment.
+- **PDF ingestion is text-only.** Scanned or image-only documents require OCR, which is not included. Complex multi-column PDFs may also reduce extraction quality.
+
+- **Chunking is character-based.** `RecursiveCharacterTextSplitter` uses character length in the current configuration rather than model-token counts.
+
+- **The default local embedding model is English-centric.** Multilingual corpora may benefit from a multilingual embedding model.
+
+- **BM25 preprocessing is deliberately simple.** It uses lowercase regex tokenization without stemming or stopword removal.
+
+- **Cross-encoder scores are ranking signals, not calibrated probabilities.** The public API intentionally does not expose a fabricated confidence value.
+
+- **Sufficiency evaluation requires an additional LLM call.** Follow-up rewriting, local generation, evaluation, and optional synthesis can increase latency and cost.
+
+- **Web fallback requires Tavily.** A valid `TAVILY_API_KEY` is required when the graph needs external evidence.
+
+- **Default conversational memory is process-local.** `InMemorySaver` loses state when the process exits.
+
+- **FAISS persistence uses pickle-backed data.** Only locally generated, trusted indexes should be loaded.
+
+- **No production concurrency or rate-limiting layer is included.**
 
 ---
 
@@ -1366,50 +1258,63 @@ These are current, deliberate trade-offs rather than bugs — worth knowing befo
 
 Possible future improvements include:
 
-* FAISS-based approximate nearest-neighbor retrieval
-* persistent conversational memory
-* asynchronous retrieval and tool execution
-* streaming responses
-* metadata filtering
-* document-level retrieval constraints
-* more sophisticated citation entailment checks
-* calibrated confidence estimation
-* evaluation datasets for retrieval quality
-* Recall@K / MRR / nDCG retrieval metrics
-* RAG evaluation pipelines
-* multiple web search providers
-* additional document formats
-* REST API layer
-* interactive frontend
-* Docker deployment
-* observability and tracing
+- token-aware chunking
+- multilingual retrieval defaults
+- persistent LangGraph checkpointing
+- PostgreSQL-backed conversation state
+- asynchronous execution
+- streaming responses
+- metadata filtering
+- document-level retrieval constraints
+- web evidence reranking
+- raw webpage extraction after search
+- semantic citation entailment verification
+- calibrated uncertainty estimation
+- retrieval evaluation datasets
+- Recall@K / MRR / nDCG
+- RAG evaluation pipelines
+- multiple web-search providers
+- additional document formats
+- OCR
+- REST API layer
+- interactive frontend
+- Docker deployment
+- LangSmith tracing and observability
 
 ---
 
 ## Summary
 
-This project demonstrates an end-to-end agentic RAG architecture built around a few core ideas:
+This project implements an end-to-end agentic RAG workflow built around:
 
 ```text
-Hybrid retrieval
+LangChain Documents
         +
-Cross-encoder reranking
+Hybrid Retrieval
         +
-Grounded generation
+FAISS + BM25
         +
-Citation validation
+Weighted RRF
         +
-Evidence evaluation
+Cross-Encoder Reranking
         +
-Conditional web research
+Grounded Generation
         +
-Conversational context
+Structured Evidence Evaluation
+        +
+Conditional Web Research
+        +
+Evidence Synthesis
+        +
+Citation Validation
+        +
+LangGraph Memory and Routing
 ```
 
-Rather than treating RAG as simply:
+Rather than treating RAG as:
 
 ```text
 embed → retrieve → prompt
 ```
 
-the system implements a multi-stage research workflow in which retrieval quality, evidence sufficiency, source provenance, conversation context, and fallback behavior are handled as explicit architectural components.
+the system models research as a stateful workflow in which retrieval quality, evidence sufficiency, source provenance, conversation context, fallback behavior, and citation integrity are explicit architectural concerns.
