@@ -1,0 +1,28 @@
+# Secrets
+.env
+
+# Local document corpus
+papers/*.pdf
+
+# Generated indexes
+data/indexes/*.npz
+
+# Jupyter notebooks
+*.ipynb
+.ipynb_checkpoints/
+notebooks/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+*.egg-info/
+.vscode/
