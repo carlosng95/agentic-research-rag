@@ -65,7 +65,6 @@ def create_app(application_builder: ApplicationBuilder = build_application) -> F
                 duration_ms,
                 request_id,
             )
-
             raise
 
         duration_ms = (perf_counter() - started_at) * 1000
