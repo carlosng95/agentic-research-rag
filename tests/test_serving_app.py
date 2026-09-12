@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from agentic_research_rag.serving.app import create_app
 from uuid import UUID
-
+from agentic_research_rag.config import Settings
 
 class FakeGraph:
     def __init__(self) -> None:
@@ -229,3 +229,57 @@ def test_unhandled_exception_returns_generic_500() -> None:
 
     assert response.headers["X-Request-ID"] == "failed-request-123"
     assert "Sensitive internal error" not in response.text
+    
+def test_build_runtime_materializes_before_building_application(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from agentic_research_rag.serving import app as serving_app
+
+    calls = []
+
+    settings = Settings(
+        artifact_source = "s3",
+        artifact_bucket = "test-bucket",
+    )
+
+    expected_graph = object()
+
+    def fake_materialize_index(index_dir, settings):
+        calls.append("materialize")
+
+        assert index_dir == tmp_path
+        assert settings.artifact_source == "s3"
+
+        return "v001"
+
+    def fake_build_application(index_dir, settings):
+        calls.append("build")
+
+        assert index_dir == tmp_path
+
+        return expected_graph
+
+    monkeypatch.setattr(
+        serving_app,
+        "materialize_index",
+        fake_materialize_index,
+    )
+
+    monkeypatch.setattr(
+        serving_app,
+        "build_application",
+        fake_build_application,
+    )
+
+    graph, version = serving_app.build_runtime(
+        index_dir = tmp_path,
+        settings = settings,
+    )
+
+    assert graph is expected_graph
+    assert version == "v001"
+    assert calls == [
+        "materialize",
+        "build",
+    ]

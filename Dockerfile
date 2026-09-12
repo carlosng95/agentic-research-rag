@@ -1,8 +1,39 @@
-FROM python:3.11-slim
+FROM python:3.11-slim AS dependencies
+
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+RUN python -m venv $VIRTUAL_ENV
+
+COPY pyproject.toml /tmp/pyproject.toml
+
+RUN python - <<'PY'
+import tomllib
+from pathlib import Path
+
+with open("/tmp/pyproject.toml", "rb") as file:
+    pyproject = tomllib.load(file)
+
+dependencies = pyproject["project"]["dependencies"]
+
+Path("/tmp/requirements.txt").write_text(
+    "\n".join(dependencies),
+    encoding = "utf-8",
+)
+PY
+
+RUN python -m pip install --upgrade pip \
+    && python -m pip install --no-cache-dir "torch==2.14.0+cpu" --index-url https://download.pytorch.org/whl/cpu \
+    && python -m pip install --no-cache-dir -r /tmp/requirements.txt
+
+
+FROM python:3.11-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV HF_HOME=/home/appuser/.cache/huggingface
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /app
 
@@ -10,16 +41,13 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml ./
-COPY agentic_research_rag ./agentic_research_rag
-
-RUN python -m pip install --upgrade pip \
-    && python -m pip install --no-cache-dir "torch==2.14.0+cpu" --index-url https://download.pytorch.org/whl/cpu \
-    && python -m pip install --no-cache-dir .
-
 RUN useradd --create-home --shell /usr/sbin/nologin appuser \
-    && mkdir -p /app/papers /app/data/indexes /home/appuser/.cache/huggingface \
+    && mkdir -p /app/data/indexes /home/appuser/.cache/huggingface \
     && chown -R appuser:appuser /app /home/appuser
+
+COPY --from=dependencies /opt/venv /opt/venv
+
+COPY --chown=appuser:appuser agentic_research_rag ./agentic_research_rag
 
 USER appuser
 

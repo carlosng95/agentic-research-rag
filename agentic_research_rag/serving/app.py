@@ -2,6 +2,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 from time import perf_counter
 from uuid import uuid4
 
@@ -9,8 +10,10 @@ from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from langgraph.graph.state import CompiledStateGraph
 
+from ..artifacts.materialize import materialize_index
 from ..assistant import ResearchAssistant, ResearchResponse
 from ..bootstrap import build_application
+from ..config import Settings
 from .schemas import HealthResponse, ReadyResponse, ResearchRequest
 
 
@@ -19,26 +22,97 @@ logger = logging.getLogger("uvicorn.error")
 ApplicationBuilder = Callable[[], CompiledStateGraph]
 
 
-async def initialize_application(app: FastAPI, application_builder: ApplicationBuilder) -> None:
+def build_runtime(
+    index_dir: str | Path,
+    settings: Settings,
+) -> tuple[CompiledStateGraph, str | None]:
+    version = materialize_index(
+        index_dir = index_dir,
+        settings = settings,
+    )
+
+    graph = build_application(
+        index_dir = index_dir,
+        settings = settings,
+    )
+
+    return graph, version
+
+
+async def initialize_application(
+    app: FastAPI,
+    application_builder: ApplicationBuilder | None = None,
+    settings: Settings | None = None,
+) -> None:
     try:
-        app.state.graph = await asyncio.to_thread(application_builder)
-        logger.info("Research application initialized successfully.")
+        if application_builder is not None:
+            graph = await asyncio.to_thread(
+                application_builder,
+            )
+
+            version = None
+
+        else:
+            if settings is None:
+                settings = Settings.from_env()
+
+            graph, version = await asyncio.to_thread(
+                build_runtime,
+                settings.index_dir,
+                settings,
+            )
+
+        app.state.graph = graph
+        app.state.index_version = version
+        app.state.initialization_failed = False
+
+        if version is None:
+            logger.info(
+                "Research application initialized successfully."
+            )
+        else:
+            logger.info(
+                "Research application initialized successfully using index version %s.",
+                version,
+            )
+
     except Exception:
-        logger.exception("Research application initialization failed.")
+        app.state.graph = None
+        app.state.index_version = None
         app.state.initialization_failed = True
 
+        logger.exception(
+            "Research application initialization failed."
+        )
 
-def create_app(application_builder: ApplicationBuilder = build_application) -> FastAPI:
+
+def create_app(
+    application_builder: ApplicationBuilder | None = None,
+) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.graph = None
+        app.state.index_version = None
         app.state.initialization_failed = False
-        app.state.initialization_task = asyncio.create_task(initialize_application(app, application_builder))
 
-        yield
+        app.state.initialization_task = asyncio.create_task(
+            initialize_application(
+                app = app,
+                application_builder = application_builder,
+            )
+        )
 
-        if not app.state.initialization_task.done():
-            app.state.initialization_task.cancel()
+        try:
+            yield
+
+        finally:
+            if not app.state.initialization_task.done():
+                app.state.initialization_task.cancel()
+
+                try:
+                    await app.state.initialization_task
+                except asyncio.CancelledError:
+                    pass
 
     app = FastAPI(
         title = "Agentic Research RAG API",
@@ -55,6 +129,7 @@ def create_app(application_builder: ApplicationBuilder = build_application) -> F
 
         try:
             response = await call_next(request)
+
         except Exception:
             duration_ms = (perf_counter() - started_at) * 1000
 
@@ -65,6 +140,7 @@ def create_app(application_builder: ApplicationBuilder = build_application) -> F
                 duration_ms,
                 request_id,
             )
+
             raise
 
         duration_ms = (perf_counter() - started_at) * 1000
@@ -82,13 +158,24 @@ def create_app(application_builder: ApplicationBuilder = build_application) -> F
         return response
 
     @app.exception_handler(Exception)
-    async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-        request_id = getattr(request.state, "request_id", str(uuid4()))
+    async def unhandled_exception_handler(
+        request: Request,
+        exc: Exception,
+    ) -> JSONResponse:
+        request_id = getattr(
+            request.state,
+            "request_id",
+            str(uuid4()),
+        )
 
         return JSONResponse(
             status_code = status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content = {"detail": "Internal server error."},
-            headers = {"X-Request-ID": request_id},
+            content = {
+                "detail": "Internal server error.",
+            },
+            headers = {
+                "X-Request-ID": request_id,
+            },
         )
 
     @app.get("/health", response_model = HealthResponse, tags = ["system"])
@@ -99,18 +186,31 @@ def create_app(application_builder: ApplicationBuilder = build_application) -> F
     def ready(response: Response) -> ReadyResponse:
         if app.state.initialization_failed:
             response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-            return ReadyResponse(status = "not_ready", detail = "Application initialization failed.")
+
+            return ReadyResponse(
+                status = "not_ready",
+                detail = "Application initialization failed.",
+            )
 
         if app.state.graph is None:
             response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-            return ReadyResponse(status = "not_ready", detail = "Application initialization is still in progress.")
 
-        return ReadyResponse(status = "ready")
+            return ReadyResponse(
+                status = "not_ready",
+                detail = "Application initialization is still in progress.",
+            )
+
+        return ReadyResponse(
+            status = "ready",
+        )
 
     @app.post("/research", response_model = ResearchResponse, tags = ["research"])
     def research(request: ResearchRequest) -> ResearchResponse:
         if app.state.initialization_failed:
-            raise HTTPException(status_code = status.HTTP_503_SERVICE_UNAVAILABLE, detail = "Application initialization failed.")
+            raise HTTPException(
+                status_code = status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail = "Application initialization failed.",
+            )
 
         if app.state.graph is None:
             raise HTTPException(
@@ -118,9 +218,14 @@ def create_app(application_builder: ApplicationBuilder = build_application) -> F
                 detail = "Application initialization is still in progress.",
             )
 
-        assistant = ResearchAssistant(graph = app.state.graph, thread_id = request.thread_id)
+        assistant = ResearchAssistant(
+            graph = app.state.graph,
+            thread_id = request.thread_id,
+        )
 
-        return assistant.ask(request.question)
+        return assistant.ask(
+            request.question,
+        )
 
     return app
 
