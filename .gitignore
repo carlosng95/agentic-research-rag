@@ -1,5 +1,6 @@
 # Secrets
 .env
+production.env
 
 # Local document corpus
 papers/*.pdf
@@ -27,3 +28,13 @@ venv/
 
 # macOS
 .DS_Store
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfplan
+tfplan
+crash.log
+crash.*.log
