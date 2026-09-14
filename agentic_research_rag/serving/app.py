@@ -14,6 +14,7 @@ from ..artifacts.materialize import materialize_index
 from ..assistant import ResearchAssistant, ResearchResponse
 from ..bootstrap import build_application
 from ..config import Settings
+from ..observability.metrics import emit_metric
 from .schemas import HealthResponse, ReadyResponse, ResearchRequest
 
 
@@ -86,6 +87,18 @@ async def initialize_application(
         )
 
 
+def get_metric_endpoint(request: Request) -> str:
+    route = request.scope.get("route")
+
+    if route is not None:
+        route_path = getattr(route, "path", None)
+
+        if route_path:
+            return route_path
+
+    return request.url.path
+
+
 def create_app(
     application_builder: ApplicationBuilder | None = None,
 ) -> FastAPI:
@@ -132,6 +145,44 @@ def create_app(
 
         except Exception:
             duration_ms = (perf_counter() - started_at) * 1000
+            endpoint = get_metric_endpoint(request)
+
+            emit_metric(
+                "RequestCount",
+                1,
+                dimensions = {
+                    "Endpoint": endpoint,
+                    "Method": request.method,
+                },
+                properties = {
+                    "request_id": request_id,
+                },
+            )
+
+            emit_metric(
+                "RequestLatency",
+                duration_ms,
+                unit = "Milliseconds",
+                dimensions = {
+                    "Endpoint": endpoint,
+                    "Method": request.method,
+                },
+                properties = {
+                    "request_id": request_id,
+                },
+            )
+
+            emit_metric(
+                "RequestErrorCount",
+                1,
+                dimensions = {
+                    "Endpoint": endpoint,
+                    "Method": request.method,
+                },
+                properties = {
+                    "request_id": request_id,
+                },
+            )
 
             logger.exception(
                 "HTTP request failed method=%s path=%s duration_ms=%.2f request_id=%s",
@@ -144,6 +195,49 @@ def create_app(
             raise
 
         duration_ms = (perf_counter() - started_at) * 1000
+        endpoint = get_metric_endpoint(request)
+
+        emit_metric(
+            "RequestCount",
+            1,
+            dimensions = {
+                "Endpoint": endpoint,
+                "Method": request.method,
+            },
+            properties = {
+                "request_id": request_id,
+                "status_code": response.status_code,
+            },
+        )
+
+        emit_metric(
+            "RequestLatency",
+            duration_ms,
+            unit = "Milliseconds",
+            dimensions = {
+                "Endpoint": endpoint,
+                "Method": request.method,
+            },
+            properties = {
+                "request_id": request_id,
+                "status_code": response.status_code,
+            },
+        )
+
+        if response.status_code >= 500:
+            emit_metric(
+                "RequestErrorCount",
+                1,
+                dimensions = {
+                    "Endpoint": endpoint,
+                    "Method": request.method,
+                },
+                properties = {
+                    "request_id": request_id,
+                    "status_code": response.status_code,
+                },
+            )
+
         response.headers["X-Request-ID"] = request_id
 
         logger.info(
@@ -205,7 +299,7 @@ def create_app(
         )
 
     @app.post("/research", response_model = ResearchResponse, tags = ["research"])
-    def research(request: ResearchRequest) -> ResearchResponse:
+    def research(payload: ResearchRequest, http_request: Request) -> ResearchResponse:
         if app.state.initialization_failed:
             raise HTTPException(
                 status_code = status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -218,14 +312,96 @@ def create_app(
                 detail = "Application initialization is still in progress.",
             )
 
-        assistant = ResearchAssistant(
-            graph = app.state.graph,
-            thread_id = request.thread_id,
+        request_id = http_request.state.request_id
+        started_at = perf_counter()
+
+        emit_metric(
+            "ResearchRequestCount",
+            1,
+            properties = {
+                "request_id": request_id,
+            },
         )
 
-        return assistant.ask(
-            request.question,
+        assistant = ResearchAssistant(
+            graph = app.state.graph,
+            thread_id = payload.thread_id,
         )
+
+        try:
+            research_response = assistant.ask(
+                payload.question,
+            )
+
+        except Exception:
+            duration_ms = (perf_counter() - started_at) * 1000
+
+            emit_metric(
+                "ResearchLatency",
+                duration_ms,
+                unit = "Milliseconds",
+                properties = {
+                    "request_id": request_id,
+                },
+            )
+
+            emit_metric(
+                "ResearchErrorCount",
+                1,
+                properties = {
+                    "request_id": request_id,
+                },
+            )
+
+            raise
+
+        duration_ms = (perf_counter() - started_at) * 1000
+
+        emit_metric(
+            "ResearchLatency",
+            duration_ms,
+            unit = "Milliseconds",
+            properties = {
+                "request_id": request_id,
+            },
+        )
+
+        emit_metric(
+            "PaperEvidenceSufficient",
+            int(research_response.paper_evidence_sufficient),
+            unit = "None",
+            properties = {
+                "request_id": request_id,
+            },
+        )
+
+        emit_metric(
+            "RetrievedDocumentCount",
+            len(research_response.sources),
+            properties = {
+                "request_id": request_id,
+            },
+        )
+
+        if "web_search" in research_response.tools_used:
+            emit_metric(
+                "WebFallbackCount",
+                1,
+                properties = {
+                    "request_id": request_id,
+                },
+            )
+
+        if not research_response.citation_valid:
+            emit_metric(
+                "CitationInvalidCount",
+                1,
+                properties = {
+                    "request_id": request_id,
+                },
+            )
+
+        return research_response
 
     return app
 
