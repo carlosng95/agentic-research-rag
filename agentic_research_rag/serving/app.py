@@ -14,9 +14,9 @@ from ..artifacts.materialize import materialize_index
 from ..assistant import ResearchAssistant, ResearchResponse
 from ..bootstrap import build_application
 from ..config import Settings
+from ..observability.context import bind_request_id
 from ..observability.metrics import emit_metric
 from .schemas import HealthResponse, ReadyResponse, ResearchRequest
-from ..observability.context import bind_request_id
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -226,7 +226,15 @@ def create_app(
             },
         )
 
-        if response.status_code >= 500:
+        is_expected_readiness_failure = (
+            endpoint == "/ready"
+            and response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+        )
+
+        if (
+            response.status_code >= 500
+            and not is_expected_readiness_failure
+        ):
             emit_metric(
                 "RequestErrorCount",
                 1,
