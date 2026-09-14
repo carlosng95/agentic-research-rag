@@ -12,19 +12,30 @@ permissions:
 
 jobs:
   aws-oidc:
-    name: Validate AWS OIDC
+    name: Validate AWS OIDC and Role Chaining
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Configure AWS credentials with OIDC
-        uses: aws-actions/configure-aws-credentials@v5
+      - name: Assume GitHub Actions role with OIDC
+        uses: aws-actions/configure-aws-credentials@v6.2.4
         with:
           role-to-assume: arn:aws:iam::649616336579:role/agentic-rag-github-actions-role
           aws-region: us-east-1
-          role-session-name: agentic-rag-github-actions
+          role-session-name: github-actions-${{ github.run_id }}
 
-      - name: Verify AWS identity
+      - name: Verify GitHub Actions role
+        run: aws sts get-caller-identity
+
+      - name: Assume Terraform role
+        uses: aws-actions/configure-aws-credentials@v6.2.4
+        with:
+          role-to-assume: arn:aws:iam::649616336579:role/agentic-rag-terraform-role
+          aws-region: us-east-1
+          role-chaining: true
+          role-session-name: terraform-${{ github.run_id }}
+
+      - name: Verify Terraform role
         run: aws sts get-caller-identity
