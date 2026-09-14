@@ -92,3 +92,19 @@ output "ecs_service_id" {
   description = "ID of the ECS service."
   value       = aws_ecs_service.app.id
 }
+
+output "cloudwatch_dashboard_name" {
+  description = "CloudWatch observability dashboard name."
+  value       = aws_cloudwatch_dashboard.observability.dashboard_name
+}
+
+output "cloudwatch_alarm_names" {
+  description = "CloudWatch observability alarm names."
+
+  value = [
+    aws_cloudwatch_metric_alarm.research_request_errors.alarm_name,
+    aws_cloudwatch_metric_alarm.alb_unhealthy_target.alarm_name,
+    aws_cloudwatch_metric_alarm.ecs_memory_high.alarm_name,
+    aws_cloudwatch_metric_alarm.cross_encoder_latency_high.alarm_name,
+  ]
+}
