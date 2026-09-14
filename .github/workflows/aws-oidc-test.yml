@@ -2,6 +2,9 @@ name: AWS OIDC Test
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - mlops/aws-deployment
 
 permissions:
   contents: read
