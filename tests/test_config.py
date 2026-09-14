@@ -31,6 +31,8 @@ def test_default_settings() -> None:
     assert settings.final_k == 5
 
     assert settings.memory_turns == 5
+    assert settings.checkpoint_backend == "memory"
+    assert settings.database_url == ""
 
 
 def test_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -55,6 +57,11 @@ def test_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FINAL_K", "8")
 
     monkeypatch.setenv("MEMORY_TURNS", "10")
+    monkeypatch.setenv("CHECKPOINT_BACKEND", "POSTGRES")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql://user:password@localhost:5432/test",
+    )
 
     settings = Settings.from_env()
 
@@ -79,6 +86,10 @@ def test_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.final_k == 8
 
     assert settings.memory_turns == 10
+    assert settings.checkpoint_backend == "postgres"
+    assert settings.database_url == (
+        "postgresql://user:password@localhost:5432/test"
+    )
 
 
 @pytest.mark.parametrize(
@@ -117,6 +128,38 @@ def test_embedding_backend_must_be_supported() -> None:
         Settings(
             embedding_backend = "unknown",
         )
+
+
+def test_checkpoint_backend_must_be_supported() -> None:
+    with pytest.raises(
+        ValueError,
+        match = "checkpoint_backend must be either 'memory' or 'postgres'",
+    ):
+        Settings(
+            checkpoint_backend = "unknown",
+        )
+
+
+def test_postgres_checkpoint_backend_requires_database_url() -> None:
+    with pytest.raises(
+        ValueError,
+        match = "database_url is required",
+    ):
+        Settings(
+            checkpoint_backend = "postgres",
+        )
+
+
+def test_postgres_checkpoint_backend_accepts_database_url() -> None:
+    settings = Settings(
+        checkpoint_backend = "postgres",
+        database_url = "postgresql://user:password@localhost:5432/test",
+    )
+
+    assert settings.checkpoint_backend == "postgres"
+    assert settings.database_url == (
+        "postgresql://user:password@localhost:5432/test"
+    )
 
 
 def test_retrieval_weights_cannot_both_be_zero() -> None:

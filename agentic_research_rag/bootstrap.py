@@ -1,7 +1,6 @@
 from pathlib import Path
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.state import CompiledStateGraph
 
 from .chains.model import build_chat_model
@@ -17,10 +16,12 @@ from .retrieval.index_manager import load_index_artifacts
 from .retrieval.reranker import build_reranking_retriever
 from .tools.web_search import build_web_search_tool
 
+
 def build_application(
     index_dir: str | Path = "data/indexes/faiss",
     settings: Settings | None = None,
-    checkpointer: BaseCheckpointSaver | None = None,
+    *,
+    checkpointer: BaseCheckpointSaver,
 ) -> CompiledStateGraph:
     if settings is None:
         settings = Settings.from_env()
@@ -58,9 +59,6 @@ def build_application(
     sufficiency_chain = build_sufficiency_chain(model = model)
     synthesis_chain = build_synthesis_chain(model = model)
     web_search_tool = build_web_search_tool()
-
-    if checkpointer is None:
-        checkpointer = InMemorySaver()
 
     return build_research_graph(
         query_rewriter = query_rewriter,

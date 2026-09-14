@@ -244,6 +244,7 @@ def test_build_runtime_materializes_before_building_application(
     )
 
     expected_graph = object()
+    checkpointer = object()
 
     def fake_materialize_index(index_dir, settings):
         calls.append("materialize")
@@ -253,12 +254,15 @@ def test_build_runtime_materializes_before_building_application(
 
         return "v001"
 
-    def fake_build_application(index_dir, settings):
+    def fake_build_application(index_dir, settings, *, checkpointer):
         calls.append("build")
 
         assert index_dir == tmp_path
+        assert checkpointer is expected_checkpointer
 
         return expected_graph
+
+    expected_checkpointer = checkpointer
 
     monkeypatch.setattr(
         serving_app,
@@ -275,6 +279,7 @@ def test_build_runtime_materializes_before_building_application(
     graph, version = serving_app.build_runtime(
         index_dir = tmp_path,
         settings = settings,
+        checkpointer = checkpointer,
     )
 
     assert graph is expected_graph

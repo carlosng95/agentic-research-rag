@@ -18,6 +18,7 @@ dependencies = [
     "langchain-tavily",
     "langchain-text-splitters>=1.0",
     "langgraph>=1.0",
+    "langgraph-checkpoint-postgres>=3.0",
     "pydantic>=2.0",
     "pypdf",
     "python-dotenv",

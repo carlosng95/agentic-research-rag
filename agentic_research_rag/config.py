@@ -34,6 +34,8 @@ class Settings:
     final_k: int = 5
 
     memory_turns: int = 5
+    checkpoint_backend: str = "memory"
+    database_url: str = ""
 
     def __post_init__(self) -> None:
         if self.chunk_size <= 0:
@@ -112,6 +114,16 @@ class Settings:
 
         if self.memory_turns < 0:
             raise ValueError("memory_turns cannot be negative.")
+
+        if self.checkpoint_backend not in {"memory", "postgres"}:
+            raise ValueError(
+                "checkpoint_backend must be either 'memory' or 'postgres'."
+            )
+
+        if self.checkpoint_backend == "postgres" and not self.database_url.strip():
+            raise ValueError(
+                "database_url is required when checkpoint_backend is 'postgres'."
+            )
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -195,5 +207,13 @@ class Settings:
 
             memory_turns = int(
                 os.getenv("MEMORY_TURNS", "5")
+            ),
+            checkpoint_backend = os.getenv(
+                "CHECKPOINT_BACKEND",
+                "memory",
+            ).lower(),
+            database_url = os.getenv(
+                "DATABASE_URL",
+                "",
             ),
         )

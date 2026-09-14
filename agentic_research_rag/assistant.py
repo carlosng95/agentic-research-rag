@@ -6,7 +6,7 @@ from langchain_core.runnables import Runnable
 from pydantic import BaseModel, Field
 
 from .bootstrap import build_application
-
+from langgraph.checkpoint.base import BaseCheckpointSaver
 
 class Source(BaseModel):
     source_number: int = Field(
@@ -231,10 +231,13 @@ class ResearchAssistant:
 
 def build_assistant(
     thread_id: str = "default",
+    *,
+    checkpointer: BaseCheckpointSaver,
     **application_kwargs: Any,
 ) -> ResearchAssistant:
     graph = build_application(
-        **application_kwargs
+        checkpointer = checkpointer,
+        **application_kwargs,
     )
 
     return ResearchAssistant(

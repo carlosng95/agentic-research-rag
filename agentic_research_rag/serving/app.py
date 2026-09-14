@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 
 from ..artifacts.materialize import materialize_index
@@ -17,6 +18,7 @@ from ..config import Settings
 from ..observability.context import bind_request_id
 from ..observability.metrics import emit_metric
 from .schemas import HealthResponse, ReadyResponse, ResearchRequest
+from ..checkpointing import open_checkpointer
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -27,6 +29,8 @@ ApplicationBuilder = Callable[[], CompiledStateGraph]
 def build_runtime(
     index_dir: str | Path,
     settings: Settings,
+    *,
+    checkpointer: BaseCheckpointSaver,
 ) -> tuple[CompiledStateGraph, str | None]:
     version = materialize_index(
         index_dir = index_dir,
@@ -36,6 +40,7 @@ def build_runtime(
     graph = build_application(
         index_dir = index_dir,
         settings = settings,
+        checkpointer = checkpointer,
     )
 
     return graph, version
@@ -46,6 +51,8 @@ async def initialize_application(
     application_builder: ApplicationBuilder | None = None,
     settings: Settings | None = None,
 ) -> None:
+    checkpointer_context = None
+
     try:
         if application_builder is not None:
             graph = await asyncio.to_thread(
@@ -58,10 +65,19 @@ async def initialize_application(
             if settings is None:
                 settings = Settings.from_env()
 
+            checkpointer_context = open_checkpointer(settings)
+
+            checkpointer = await asyncio.to_thread(
+                checkpointer_context.__enter__
+            )
+
+            app.state.checkpointer_context = checkpointer_context
+
             graph, version = await asyncio.to_thread(
                 build_runtime,
                 settings.index_dir,
                 settings,
+                checkpointer = checkpointer,
             )
 
         app.state.graph = graph
@@ -79,6 +95,16 @@ async def initialize_application(
             )
 
     except Exception:
+        if checkpointer_context is not None:
+            await asyncio.to_thread(
+                checkpointer_context.__exit__,
+                None,
+                None,
+                None,
+            )
+
+            app.state.checkpointer_context = None
+
         app.state.graph = None
         app.state.index_version = None
         app.state.initialization_failed = True
@@ -108,6 +134,7 @@ def create_app(
         app.state.graph = None
         app.state.index_version = None
         app.state.initialization_failed = False
+        app.state.checkpointer_context = None
 
         app.state.initialization_task = asyncio.create_task(
             initialize_application(
@@ -127,6 +154,18 @@ def create_app(
                     await app.state.initialization_task
                 except asyncio.CancelledError:
                     pass
+
+            checkpointer_context = app.state.checkpointer_context
+
+            if checkpointer_context is not None:
+                await asyncio.to_thread(
+                    checkpointer_context.__exit__,
+                    None,
+                    None,
+                    None,
+                )
+
+                app.state.checkpointer_context = None
 
     app = FastAPI(
         title = "Agentic Research RAG API",

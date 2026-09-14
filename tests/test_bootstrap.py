@@ -172,7 +172,6 @@ def test_build_application_uses_in_memory_checkpointer_by_default(monkeypatch, t
     monkeypatch.setattr(bootstrap, "build_sufficiency_chain", lambda model: object())
     monkeypatch.setattr(bootstrap, "build_synthesis_chain", lambda model: object())
     monkeypatch.setattr(bootstrap, "build_web_search_tool", lambda: object())
-    monkeypatch.setattr(bootstrap, "InMemorySaver", lambda: checkpointer)
 
     def fake_build_research_graph(**kwargs):
         assert kwargs["checkpointer"] is checkpointer
@@ -183,6 +182,7 @@ def test_build_application_uses_in_memory_checkpointer_by_default(monkeypatch, t
     result = bootstrap.build_application(
         index_dir = tmp_path / "indexes",
         settings = settings,
+        checkpointer = checkpointer,
     )
 
     assert result is sentinel
