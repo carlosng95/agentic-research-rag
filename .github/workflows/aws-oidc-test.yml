@@ -1,0 +1,27 @@
+name: AWS OIDC Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  aws-oidc:
+    name: Validate AWS OIDC
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: arn:aws:iam::649616336579:role/agentic-rag-github-actions-role
+          aws-region: us-east-1
+          role-session-name: agentic-rag-github-actions
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
