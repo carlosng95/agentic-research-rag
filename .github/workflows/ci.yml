@@ -12,6 +12,58 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+
+    outputs:
+      app: ${{ steps.changes.outputs.app }}
+      infrastructure: ${{ steps.changes.outputs.infrastructure }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed areas
+        id: changes
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE_SHA="${{ github.event.before }}"
+          fi
+
+          HEAD_SHA="${{ github.sha }}"
+
+          if [[ "${BASE_SHA}" =~ ^0+$ ]]; then
+            BASE_SHA="$(git rev-list --max-parents=0 "${HEAD_SHA}")"
+          fi
+
+          CHANGED_FILES="$(git diff --name-only "${BASE_SHA}" "${HEAD_SHA}")"
+
+          echo "Changed files:"
+          echo "${CHANGED_FILES}"
+
+          APP_CHANGED=false
+          INFRASTRUCTURE_CHANGED=false
+
+          if echo "${CHANGED_FILES}" | grep -Eq '^(agentic_research_rag/|Dockerfile$|\.dockerignore$|pyproject\.toml$)'; then
+            APP_CHANGED=true
+          fi
+
+          if echo "${CHANGED_FILES}" | grep -Eq '^infra/terraform/'; then
+            INFRASTRUCTURE_CHANGED=true
+          fi
+
+          echo "app=${APP_CHANGED}" >> "${GITHUB_OUTPUT}"
+          echo "infrastructure=${INFRASTRUCTURE_CHANGED}" >> "${GITHUB_OUTPUT}"
+
+          echo "Application changed: ${APP_CHANGED}"
+          echo "Infrastructure changed: ${INFRASTRUCTURE_CHANGED}"
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -40,9 +92,14 @@ jobs:
   build-image:
     name: Build and Push ARM64 Image
     runs-on: ubuntu-latest
-    needs: test
+    needs:
+      - changes
+      - test
 
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.changes.outputs.app == 'true'
 
     permissions:
       contents: read
@@ -85,16 +142,25 @@ jobs:
         run: |
           aws ecr describe-images \
             --repository-name agentic_research_rag \
-            --image-ids imageTag=${GITHUB_SHA}
+            --image-ids imageTag="${GITHUB_SHA}"
 
   terraform-plan:
     name: Terraform Plan
     runs-on: ubuntu-latest
+
     needs:
+      - changes
       - test
       - build-image
 
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >
+      always() &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.changes.result == 'success' &&
+      needs.test.result == 'success' &&
+      needs.changes.outputs.infrastructure == 'true' &&
+      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
 
     permissions:
       contents: read
@@ -107,12 +173,51 @@ jobs:
     env:
       TF_IN_AUTOMATION: "true"
       TF_INPUT: "false"
-      TF_VAR_container_image_tag: ${{ github.sha }}
       TF_VAR_alb_ingress_cidr: ${{ vars.ALB_INGRESS_CIDR }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v6.2.4
+        with:
+          role-to-assume: arn:aws:iam::649616336579:role/agentic-rag-github-actions-role
+          aws-region: us-east-1
+          role-session-name: plan-${{ github.run_id }}
+
+      - name: Resolve image tag
+        shell: bash
+        run: |
+          if [ "${{ needs.changes.outputs.app }}" = "true" ]; then
+            IMAGE_TAG="${GITHUB_SHA}"
+          else
+            IMAGE_TAG="$(aws ecr describe-images \
+              --repository-name agentic_research_rag \
+              --query 'reverse(sort_by(imageDetails[?imageTags!=`null`],&imagePushedAt))[0].imageTags[0]' \
+              --output text)"
+          fi
+
+          if [ -z "${IMAGE_TAG}" ] || [ "${IMAGE_TAG}" = "None" ]; then
+            echo "Could not resolve an ECR image tag."
+            exit 1
+          fi
+
+          echo "Using image tag: ${IMAGE_TAG}"
+          echo "TF_VAR_container_image_tag=${IMAGE_TAG}" >> "${GITHUB_ENV}"
+
+      - name: Assume Terraform role
+        uses: aws-actions/configure-aws-credentials@v6.2.4
+        with:
+          role-to-assume: arn:aws:iam::649616336579:role/agentic-rag-terraform-role
+          aws-region: us-east-1
+          role-chaining: true
+          role-session-name: terraform-plan-${{ github.run_id }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.14.6"
 
       - name: Validate Terraform variables
         run: |
@@ -121,25 +226,10 @@ jobs:
             exit 1
           fi
 
-      - name: Configure AWS credentials with OIDC
-        uses: aws-actions/configure-aws-credentials@v6.2.4
-        with:
-          role-to-assume: arn:aws:iam::649616336579:role/agentic-rag-github-actions-role
-          aws-region: us-east-1
-          role-session-name: github-${{ github.run_id }}
-
-      - name: Assume Terraform role
-        uses: aws-actions/configure-aws-credentials@v6.2.4
-        with:
-          role-to-assume: arn:aws:iam::649616336579:role/agentic-rag-terraform-role
-          aws-region: us-east-1
-          role-chaining: true
-          role-session-name: terraform-${{ github.run_id }}
-
-      - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v4
-        with:
-          terraform_version: "1.14.6"
+          if [ -z "${TF_VAR_container_image_tag}" ]; then
+            echo "Container image tag could not be resolved."
+            exit 1
+          fi
 
       - name: Terraform format check
         run: terraform fmt -check
