@@ -16,6 +16,7 @@ from langgraph.graph import (
 from langgraph.graph.state import CompiledStateGraph
 
 from ..citation_validator import validate_citations
+from ..observability.nodes import observe_node
 from ..tools.web_search import search_web
 from .state import ResearchState
 
@@ -289,47 +290,74 @@ def build_research_graph(
 
     builder.add_node(
         "begin_turn",
-        begin_turn,
+        observe_node(
+            "begin_turn",
+            begin_turn,
+        ),
     )
 
     builder.add_node(
         "rewrite_query",
-        rewrite_query,
+        observe_node(
+            "rewrite_query",
+            rewrite_query,
+        ),
     )
 
     builder.add_node(
         "paper_rag",
-        paper_rag,
+        observe_node(
+            "paper_rag",
+            paper_rag,
+        ),
     )
 
     builder.add_node(
         "evaluate",
-        evaluate,
+        observe_node(
+            "evaluate",
+            evaluate,
+        ),
     )
 
     builder.add_node(
         "finalize_paper",
-        finalize_paper,
+        observe_node(
+            "finalize_paper",
+            finalize_paper,
+        ),
     )
 
     builder.add_node(
         "web_search",
-        web_search,
+        observe_node(
+            "web_search",
+            web_search,
+        ),
     )
 
     builder.add_node(
         "synthesize",
-        synthesize,
+        observe_node(
+            "synthesize",
+            synthesize,
+        ),
     )
 
     builder.add_node(
         "validate_citations",
-        validate_final_citations,
+        observe_node(
+            "validate_citations",
+            validate_final_citations,
+        ),
     )
 
     builder.add_node(
         "store_assistant_message",
-        store_assistant_message,
+        observe_node(
+            "store_assistant_message",
+            store_assistant_message,
+        ),
     )
 
     builder.add_edge(

@@ -10,7 +10,7 @@ from langchain_core.runnables import (
     RunnableLambda,
     RunnablePassthrough,
 )
-
+from ..observability.llm import with_llm_operation
 
 class SynthesisInput(TypedDict):
     question: str
@@ -188,6 +188,10 @@ def _no_evidence(
 def build_synthesis_chain(
     model: BaseChatModel,
 ) -> Runnable[SynthesisInput, SynthesisResult]:
+    observed_model = with_llm_operation(
+        model,
+        "synthesis",
+    )
     generation_chain = (
         RunnableLambda(
             lambda state: {
@@ -196,7 +200,7 @@ def build_synthesis_chain(
             }
         )
         | _SYNTHESIS_PROMPT
-        | model
+        | observed_model
         | StrOutputParser()
     )
 

@@ -12,6 +12,8 @@ from langchain_core.runnables import (
     RunnablePassthrough,
 )
 
+from ..observability.operations import observe_operation
+from ..observability.llm import with_llm_operation
 
 class RAGResult(TypedDict):
     answer: str
@@ -48,15 +50,10 @@ _RAG_PROMPT = ChatPromptTemplate.from_messages(
 )
 
 
-def format_documents(
-    documents: list[Document],
-) -> str:
+def format_documents(documents: list[Document]) -> str:
     parts = []
 
-    for source_number, document in enumerate(
-        documents,
-        start = 1,
-    ):
+    for source_number, document in enumerate(documents, start = 1):
         source = document.metadata.get(
             "source",
             "unknown",
@@ -85,13 +82,11 @@ def format_documents(
     return "\n\n---\n\n".join(parts)
 
 
-def _retrieve(
-    query: str,
-    retriever: BaseRetriever,
-) -> dict[str, object]:
-    documents = retriever.invoke(
-        query
-    )
+def _retrieve(query: str, retriever: BaseRetriever) -> dict[str, object]:
+    with observe_operation("paper_retrieval"):
+        documents = retriever.invoke(
+            query
+        )
 
     return {
         "question": query,
@@ -99,9 +94,7 @@ def _retrieve(
     }
 
 
-def _prepare_generation_input(
-    state: dict[str, object],
-) -> dict[str, object]:
+def _prepare_generation_input(state: dict[str, object]) -> dict[str, object]:
     documents = state["documents"]
 
     if not isinstance(documents, list):
@@ -109,17 +102,38 @@ def _prepare_generation_input(
             "Expected documents to be a list."
         )
 
+    with observe_operation("paper_context_formatting"):
+        context = format_documents(
+            documents = documents
+        )
+
     return {
         **state,
-        "context": format_documents(
-            documents = documents
-        ),
+        "context": context,
     }
 
 
-def _finalize_result(
+def _generate_answer(
     state: dict[str, object],
-) -> RAGResult:
+    generation_chain: Runnable,
+) -> str:
+    with observe_operation("paper_generation"):
+        answer = generation_chain.invoke(
+            {
+                "question": state["question"],
+                "context": state["context"],
+            }
+        )
+
+    if not isinstance(answer, str):
+        raise TypeError(
+            "Expected generated answer to be a string."
+        )
+
+    return answer
+
+
+def _finalize_result(state: dict[str, object]) -> RAGResult:
     answer = state["answer"]
     documents = state["documents"]
 
@@ -139,9 +153,7 @@ def _finalize_result(
     }
 
 
-def _no_results(
-    state: dict[str, object],
-) -> RAGResult:
+def _no_results(state: dict[str, object]) -> RAGResult:
     documents = state["documents"]
 
     if not isinstance(documents, list):
@@ -162,15 +174,11 @@ def build_rag_chain(
     retriever: BaseRetriever,
     model: BaseChatModel,
 ) -> Runnable[str, RAGResult]:
+    observed_model = with_llm_operation(model, "paper_generation")
+    
     generation_chain = (
-        RunnableLambda(
-            lambda state: {
-                "question": state["question"],
-                "context": state["context"],
-            }
-        )
-        | _RAG_PROMPT
-        | model
+        _RAG_PROMPT
+        | observed_model
         | StrOutputParser()
     )
 
@@ -179,7 +187,12 @@ def build_rag_chain(
             _prepare_generation_input
         )
         | RunnablePassthrough.assign(
-            answer = generation_chain
+            answer = RunnableLambda(
+                lambda state: _generate_answer(
+                    state = state,
+                    generation_chain = generation_chain,
+                )
+            )
         )
         | RunnableLambda(
             _finalize_result

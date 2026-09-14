@@ -8,6 +8,7 @@ from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
 
 from ..config import Settings
+from ..observability.operations import observe_operation
 
 
 def _tokenize(text: str) -> list[str]:
@@ -49,69 +50,74 @@ class HybridRetriever(BaseRetriever):
         self,
         query: str,
     ) -> list[Document]:
-        semantic_documents = self.semantic_retriever.invoke(
-            query
-        )
+        with observe_operation("semantic_retrieval"):
+            semantic_documents = self.semantic_retriever.invoke(
+                query
+            )
 
-        bm25_documents = self.bm25_retriever.invoke(
-            query
-        )
+        with observe_operation("bm25_retrieval"):
+            bm25_documents = self.bm25_retriever.invoke(
+                query
+            )
 
-        rankings = [
-            (
-                semantic_documents,
-                self.semantic_weight,
-            ),
-            (
-                bm25_documents,
-                self.bm25_weight,
-            ),
-        ]
+        with observe_operation("rrf_fusion"):
+            rankings = [
+                (
+                    semantic_documents,
+                    self.semantic_weight,
+                ),
+                (
+                    bm25_documents,
+                    self.bm25_weight,
+                ),
+            ]
 
-        scores: dict[Hashable, float] = defaultdict(float)
-        documents: dict[Hashable, Document] = {}
-        first_seen: dict[Hashable, int] = {}
+            scores: dict[Hashable, float] = defaultdict(float)
+            documents: dict[Hashable, Document] = {}
+            first_seen: dict[Hashable, int] = {}
 
-        order = 0
+            order = 0
 
-        for ranking, weight in rankings:
-            seen_in_ranking: set[Hashable] = set()
+            for ranking, weight in rankings:
+                seen_in_ranking: set[Hashable] = set()
 
-            for rank, document in enumerate(
-                ranking,
-                start = 1,
-            ):
-                key = _document_key(
-                    document = document
-                )
+                for rank, document in enumerate(
+                    ranking,
+                    start = 1,
+                ):
+                    key = _document_key(
+                        document = document
+                    )
 
-                if key in seen_in_ranking:
-                    continue
+                    if key in seen_in_ranking:
+                        continue
 
-                seen_in_ranking.add(key)
+                    seen_in_ranking.add(key)
 
-                if key not in documents:
-                    documents[key] = document
-                    first_seen[key] = order
-                    order += 1
+                    if key not in documents:
+                        documents[key] = document
+                        first_seen[key] = order
+                        order += 1
 
-                scores[key] += (
-                    weight
-                    / (self.rrf_k + rank)
-                )
+                    scores[key] += (
+                        weight
+                        / (self.rrf_k + rank)
+                    )
 
-        ranked_keys = sorted(
-            scores,
-            key = lambda key: (
-                -scores[key],
-                first_seen[key],
-            ),
-        )
+            ranked_keys = sorted(
+                scores,
+                key = lambda key: (
+                    -scores[key],
+                    first_seen[key],
+                ),
+            )
 
-        return [
-            documents[key]
-            for key in ranked_keys[:self.top_k]
-        ]
+            ranked_documents = [
+                documents[key]
+                for key in ranked_keys[:self.top_k]
+            ]
+
+        return ranked_documents
 
 
 def build_hybrid_retriever(

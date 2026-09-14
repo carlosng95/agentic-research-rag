@@ -25,10 +25,12 @@ def test_build_chat_model(
         model: str,
         temperature: float,
         max_retries: int,
+        callbacks: list,
     ) -> FakeChatModel:
         captured["model"] = model
         captured["temperature"] = temperature
         captured["max_retries"] = max_retries
+        captured["callbacks"] = callbacks
 
         return FakeChatModel(
             model = model,
@@ -56,8 +58,20 @@ def test_build_chat_model(
         FakeChatModel,
     )
 
-    assert captured == {
-        "model": "test-model",
-        "temperature": 0.2,
-        "max_retries": 2,
-    }
+    assert captured["model"] == "test-model"
+    assert captured["temperature"] == 0.2
+    assert captured["max_retries"] == 2
+
+    callbacks = captured["callbacks"]
+
+    assert isinstance(
+        callbacks,
+        list,
+    )
+
+    assert len(callbacks) == 1
+
+    assert isinstance(
+        callbacks[0],
+        model_module.LLMMetricsCallback,
+    )

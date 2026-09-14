@@ -11,7 +11,7 @@ from langchain_core.runnables import (
 from pydantic import BaseModel
 
 from .rag import format_documents
-
+from ..observability.llm import with_llm_operation
 
 class SufficiencyInput(TypedDict):
     question: str
@@ -77,8 +77,11 @@ def _no_documents(
 def build_sufficiency_chain(
     model: BaseChatModel,
 ) -> Runnable[SufficiencyInput, SufficiencyResult]:
-    structured_model = model.with_structured_output(
-        SufficiencyResult
+    structured_model = with_llm_operation(
+        model.with_structured_output(
+            SufficiencyResult
+        ),
+        "sufficiency",
     )
 
     evaluation_chain = (

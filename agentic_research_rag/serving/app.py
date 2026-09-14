@@ -16,6 +16,7 @@ from ..bootstrap import build_application
 from ..config import Settings
 from ..observability.metrics import emit_metric
 from .schemas import HealthResponse, ReadyResponse, ResearchRequest
+from ..observability.context import bind_request_id
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -141,7 +142,8 @@ def create_app(
         started_at = perf_counter()
 
         try:
-            response = await call_next(request)
+            with bind_request_id(request_id):
+                response = await call_next(request)
 
         except Exception:
             duration_ms = (perf_counter() - started_at) * 1000

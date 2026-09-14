@@ -8,6 +8,7 @@ from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
 
 from ..config import Settings
+from ..observability.operations import observe_operation
 
 
 class RerankingRetriever(BaseRetriever):
@@ -23,9 +24,10 @@ class RerankingRetriever(BaseRetriever):
         self,
         query: str,
     ) -> list[Document]:
-        documents = self.base_retriever.invoke(
-            query
-        )
+        with observe_operation("hybrid_retrieval"):
+            documents = self.base_retriever.invoke(
+                query
+            )
 
         if not documents:
             return []
@@ -38,23 +40,27 @@ class RerankingRetriever(BaseRetriever):
             for document in documents
         ]
 
-        scores = self.cross_encoder.score(
-            text_pairs
-        )
+        with observe_operation("cross_encoder_scoring"):
+            scores = self.cross_encoder.score(
+                text_pairs
+            )
 
-        ranked = sorted(
-            zip(
-                documents,
-                scores,
-            ),
-            key = lambda item: item[1],
-            reverse = True,
-        )
+        with observe_operation("rerank_sorting"):
+            ranked = sorted(
+                zip(
+                    documents,
+                    scores,
+                ),
+                key = lambda item: item[1],
+                reverse = True,
+            )
 
-        return [
-            document
-            for document, _ in ranked[:self.top_n]
-        ]
+            final_documents = [
+                document
+                for document, _ in ranked[:self.top_n]
+            ]
+
+        return final_documents
 
 
 def build_reranking_retriever(

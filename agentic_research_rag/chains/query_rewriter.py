@@ -12,7 +12,7 @@ from langchain_core.runnables import (
     RunnableBranch,
     RunnableLambda,
 )
-
+from ..observability.llm import with_llm_operation
 
 class QueryRewriteInput(TypedDict):
     question: str
@@ -56,9 +56,14 @@ def _original_question(
 def build_query_rewriter(
     model: BaseChatModel,
 ) -> Runnable[QueryRewriteInput, str]:
+    observed_model = with_llm_operation(
+        model,
+        "query_rewrite",
+    )
+
     rewrite_chain = (
         _QUERY_REWRITE_PROMPT
-        | model
+        | observed_model
         | StrOutputParser()
         | RunnableLambda(
             lambda query: query.strip()
