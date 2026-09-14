@@ -1,0 +1,83 @@
+name: Shutdown AWS Runtime
+
+"on":
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "ECR image tag currently deployed (full Git SHA)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: production-terraform
+  cancel-in-progress: false
+
+jobs:
+  destroy:
+    name: Terraform Destroy
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: infra/terraform
+
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+      TF_VAR_container_image_tag: ${{ inputs.image_tag }}
+      TF_VAR_alb_ingress_cidr: ${{ vars.ALB_INGRESS_CIDR }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Validate shutdown variables
+        run: |
+          if [ -z "${TF_VAR_container_image_tag}" ]; then
+            echo "image_tag is required."
+            exit 1
+          fi
+
+          if [ -z "${TF_VAR_alb_ingress_cidr}" ]; then
+            echo "ALB_INGRESS_CIDR repository variable is not configured."
+            exit 1
+          fi
+
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v6.2.4
+        with:
+          role-to-assume: arn:aws:iam::649616336579:role/agentic-rag-github-actions-role
+          aws-region: us-east-1
+          role-session-name: shutdown-${{ github.run_id }}
+
+      - name: Assume Terraform role
+        uses: aws-actions/configure-aws-credentials@v6.2.4
+        with:
+          role-to-assume: arn:aws:iam::649616336579:role/agentic-rag-terraform-role
+          aws-region: us-east-1
+          role-chaining: true
+          role-session-name: terraform-shutdown-${{ github.run_id }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.14.6"
+
+      - name: Terraform format check
+        run: terraform fmt -check
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Terraform validate
+        run: terraform validate
+
+      - name: Terraform destroy plan
+        run: terraform plan -destroy -no-color -input=false -out=destroy.tfplan
+
+      - name: Terraform destroy
+        run: terraform apply -input=false -auto-approve destroy.tfplan

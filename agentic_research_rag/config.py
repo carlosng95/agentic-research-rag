@@ -9,6 +9,13 @@ class Settings:
     chunk_size: int = 1200
     chunk_overlap: int = 200
 
+    index_dir: str = "data/indexes/faiss"
+    artifact_source: str = "local"
+
+    aws_region: str = "us-east-1"
+    artifact_bucket: str = ""
+    artifact_prefix: str = "agentic-research-rag"
+
     embedding_backend: str = "local"
     local_embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     openai_embedding_model: str = "text-embedding-3-small"
@@ -37,6 +44,18 @@ class Settings:
 
         if self.chunk_overlap >= self.chunk_size:
             raise ValueError("chunk_overlap must be smaller than chunk_size.")
+
+        if not self.index_dir.strip():
+            raise ValueError("index_dir cannot be empty.")
+
+        if self.artifact_source not in {"local", "s3"}:
+            raise ValueError("artifact_source must be either 'local' or 's3'.")
+
+        if not self.aws_region.strip():
+            raise ValueError("aws_region cannot be empty.")
+
+        if not self.artifact_prefix.strip():
+            raise ValueError("artifact_prefix cannot be empty.")
 
         if self.embedding_backend not in {"local", "openai"}:
             raise ValueError(
@@ -99,8 +118,34 @@ class Settings:
         load_dotenv()
 
         return cls(
-            chunk_size = int(os.getenv("CHUNK_SIZE", "1200")),
-            chunk_overlap = int(os.getenv("CHUNK_OVERLAP", "200")),
+            chunk_size = int(
+                os.getenv("CHUNK_SIZE", "1200")
+            ),
+            chunk_overlap = int(
+                os.getenv("CHUNK_OVERLAP", "200")
+            ),
+
+            index_dir = os.getenv(
+                "INDEX_DIR",
+                "data/indexes/faiss",
+            ),
+            artifact_source = os.getenv(
+                "ARTIFACT_SOURCE",
+                "local",
+            ),
+
+            aws_region = os.getenv(
+                "AWS_REGION",
+                "us-east-1",
+            ),
+            artifact_bucket = os.getenv(
+                "ARTIFACT_BUCKET",
+                "",
+            ),
+            artifact_prefix = os.getenv(
+                "ARTIFACT_PREFIX",
+                "agentic-research-rag",
+            ),
 
             embedding_backend = os.getenv(
                 "EMBEDDING_BACKEND",
@@ -128,7 +173,9 @@ class Settings:
                 os.getenv("LLM_TEMPERATURE", "0.0")
             ),
 
-            rrf_k = int(os.getenv("RRF_K", "60")),
+            rrf_k = int(
+                os.getenv("RRF_K", "60")
+            ),
             semantic_weight = float(
                 os.getenv("SEMANTIC_WEIGHT", "0.5")
             ),
