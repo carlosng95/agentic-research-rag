@@ -11,6 +11,9 @@ class Settings:
 
     index_dir: str = "data/indexes/faiss"
     artifact_source: str = "local"
+    corpus_source: str = "local"
+    corpus_bucket: str = ""
+    corpus_prefix: str = "agentic-research-rag/source-documents"
 
     aws_region: str = "us-east-1"
     artifact_bucket: str = ""
@@ -52,6 +55,19 @@ class Settings:
 
         if self.artifact_source not in {"local", "s3"}:
             raise ValueError("artifact_source must be either 'local' or 's3'.")
+        
+        if self.corpus_source not in {"local", "s3"}:
+            raise ValueError(
+                "corpus_source must be either 'local' or 's3'."
+            )
+
+        if self.corpus_source == "s3" and not self.corpus_bucket.strip():
+            raise ValueError(
+                "corpus_bucket is required when corpus_source is 's3'."
+            )
+
+        if not self.corpus_prefix.strip():
+            raise ValueError("corpus_prefix cannot be empty.")
 
         if not self.aws_region.strip():
             raise ValueError("aws_region cannot be empty.")
@@ -144,6 +160,19 @@ class Settings:
             artifact_source = os.getenv(
                 "ARTIFACT_SOURCE",
                 "local",
+            ),
+            
+            corpus_source = os.getenv(
+                "CORPUS_SOURCE",
+                "local",
+            ).lower(),
+            corpus_bucket = os.getenv(
+                "CORPUS_BUCKET",
+                "",
+            ),
+            corpus_prefix = os.getenv(
+                "CORPUS_PREFIX",
+                "agentic-research-rag/source-documents",
             ),
 
             aws_region = os.getenv(

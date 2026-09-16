@@ -3,6 +3,7 @@ from pathlib import Path
 import shutil
 
 from ..config import Settings
+from ..ingestion.corpus_source import materialize_corpus_source
 from ..ingestion.documents import load_corpus
 from ..retrieval.embeddings import build_embeddings
 from ..retrieval.index_manager import build_vector_store, save_vector_store
@@ -27,15 +28,23 @@ def build_index(
                 "Use --force to replace the existing index."
             )
 
-        shutil.rmtree(index_dir)
+        shutil.rmtree(
+            index_dir
+        )
 
-    documents = load_corpus(
-        papers_dir = papers_dir,
-        chunk_size = settings.chunk_size,
-        chunk_overlap = settings.chunk_overlap,
+    with materialize_corpus_source(
+        settings = settings,
+        local_papers_dir = papers_dir,
+    ) as corpus_dir:
+        documents = load_corpus(
+            papers_dir = corpus_dir,
+            chunk_size = settings.chunk_size,
+            chunk_overlap = settings.chunk_overlap,
+        )
+
+    embeddings = build_embeddings(
+        settings = settings
     )
-
-    embeddings = build_embeddings(settings = settings)
 
     vector_store = build_vector_store(
         documents = documents,
@@ -49,18 +58,23 @@ def build_index(
         settings = settings,
     )
 
-    print(f"Index built successfully.")
+    print("Index built successfully.")
     print(f"Documents: {len(documents)}")
     print(f"Index directory: {index_dir}")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description = "Build retrieval index artifacts.")
+    parser = argparse.ArgumentParser(
+        description = "Build retrieval index artifacts."
+    )
 
     parser.add_argument(
         "--papers-dir",
         default = "papers",
-        help = "Directory containing source PDF files.",
+        help = (
+            "Local source PDF directory. "
+            "Used when CORPUS_SOURCE=local."
+        ),
     )
 
     parser.add_argument(

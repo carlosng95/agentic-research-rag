@@ -20,7 +20,7 @@ dependencies = [
     "langgraph>=1.0",
     "langgraph-checkpoint-postgres>=3.0",
     "pydantic>=2.0",
-    "pypdf",
+    "pypdf==6.16.2",
     "python-dotenv",
     "rank-bm25",
     "sentence-transformers",

@@ -33,6 +33,11 @@ def test_default_settings() -> None:
     assert settings.memory_turns == 5
     assert settings.checkpoint_backend == "memory"
     assert settings.database_url == ""
+    assert settings.corpus_source == "local"
+    assert settings.corpus_bucket == ""
+    assert settings.corpus_prefix == (
+        "agentic-research-rag/source-documents"
+    )
 
 
 def test_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -63,6 +68,13 @@ def test_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "postgresql://user:password@localhost:5432/test",
     )
 
+    monkeypatch.setenv("CORPUS_SOURCE", "S3")
+    monkeypatch.setenv("CORPUS_BUCKET", "test-corpus-bucket")
+    monkeypatch.setenv(
+        "CORPUS_PREFIX",
+        "test/source-documents",
+    )
+
     settings = Settings.from_env()
 
     assert settings.chunk_size == 800
@@ -90,6 +102,10 @@ def test_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.database_url == (
         "postgresql://user:password@localhost:5432/test"
     )
+
+    assert settings.corpus_source == "s3"
+    assert settings.corpus_bucket == "test-corpus-bucket"
+    assert settings.corpus_prefix == "test/source-documents"
 
 
 @pytest.mark.parametrize(
@@ -201,4 +217,43 @@ def test_llm_temperature_range(temperature: float) -> None:
     with pytest.raises(ValueError):
         Settings(
             llm_temperature = temperature,
+        )
+        
+def test_corpus_source_must_be_supported() -> None:
+    with pytest.raises(
+        ValueError,
+        match = "corpus_source must be either 'local' or 's3'",
+    ):
+        Settings(
+            corpus_source = "unknown",
+        )
+
+
+def test_s3_corpus_source_requires_bucket() -> None:
+    with pytest.raises(
+        ValueError,
+        match = "corpus_bucket is required",
+    ):
+        Settings(
+            corpus_source = "s3",
+        )
+
+
+def test_s3_corpus_source_accepts_bucket() -> None:
+    settings = Settings(
+        corpus_source = "s3",
+        corpus_bucket = "test-bucket",
+    )
+
+    assert settings.corpus_source == "s3"
+    assert settings.corpus_bucket == "test-bucket"
+
+
+def test_corpus_prefix_cannot_be_empty() -> None:
+    with pytest.raises(
+        ValueError,
+        match = "corpus_prefix cannot be empty",
+    ):
+        Settings(
+            corpus_prefix = "",
         )

@@ -5,17 +5,29 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
-def load_pdf_documents(pdf_path: str | Path) -> list[Document]:
+def load_pdf_documents(
+    pdf_path: str | Path,
+    source_name: str | None = None,
+) -> list[Document]:
     pdf_path = Path(pdf_path)
 
     if not pdf_path.exists():
-        raise FileNotFoundError(f"PDF file not found: {pdf_path}")
+        raise FileNotFoundError(
+            f"PDF file not found: {pdf_path}"
+        )
 
     if not pdf_path.is_file():
-        raise ValueError(f"Expected a file, got: {pdf_path}")
+        raise ValueError(
+            f"Expected a file, got: {pdf_path}"
+        )
 
     if pdf_path.suffix.lower() != ".pdf":
-        raise ValueError(f"Expected a PDF file, got: {pdf_path}")
+        raise ValueError(
+            f"Expected a PDF file, got: {pdf_path}"
+        )
+
+    if source_name is None:
+        source_name = pdf_path.name
 
     loader = PyPDFLoader(
         file_path = str(pdf_path),
@@ -25,10 +37,15 @@ def load_pdf_documents(pdf_path: str | Path) -> list[Document]:
     documents = loader.load()
 
     for document in documents:
-        page = int(document.metadata.get("page", 0))
+        page = int(
+            document.metadata.get(
+                "page",
+                0,
+            )
+        )
 
-        document.metadata["source"] = pdf_path.name
-        document.metadata["document_name"] = pdf_path.name
+        document.metadata["source"] = source_name
+        document.metadata["document_name"] = source_name
         document.metadata["page_number"] = page + 1
 
     return documents
@@ -40,13 +57,19 @@ def split_documents(
     chunk_overlap: int,
 ) -> list[Document]:
     if chunk_size <= 0:
-        raise ValueError("chunk_size must be greater than 0.")
+        raise ValueError(
+            "chunk_size must be greater than 0."
+        )
 
     if chunk_overlap < 0:
-        raise ValueError("chunk_overlap cannot be negative.")
+        raise ValueError(
+            "chunk_overlap cannot be negative."
+        )
 
     if chunk_overlap >= chunk_size:
-        raise ValueError("chunk_overlap must be smaller than chunk_size.")
+        raise ValueError(
+            "chunk_overlap must be smaller than chunk_size."
+        )
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size = chunk_size,
@@ -55,7 +78,9 @@ def split_documents(
         is_separator_regex = False,
     )
 
-    return splitter.split_documents(documents)
+    return splitter.split_documents(
+        documents
+    )
 
 
 def load_corpus(
@@ -75,7 +100,12 @@ def load_corpus(
             f"Expected a directory, got: {papers_dir}"
         )
 
-    pdf_files = sorted(papers_dir.glob("*.pdf"))
+    pdf_files = sorted(
+        path
+        for path in papers_dir.rglob("*")
+        if path.is_file()
+        and path.suffix.lower() == ".pdf"
+    )
 
     if not pdf_files:
         raise ValueError(
@@ -85,8 +115,17 @@ def load_corpus(
     documents: list[Document] = []
 
     for pdf_path in pdf_files:
+        source_name = (
+            pdf_path
+            .relative_to(papers_dir)
+            .as_posix()
+        )
+
         documents.extend(
-            load_pdf_documents(pdf_path = pdf_path)
+            load_pdf_documents(
+                pdf_path = pdf_path,
+                source_name = source_name,
+            )
         )
 
     chunks = split_documents(
