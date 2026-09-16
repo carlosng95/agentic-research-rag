@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   build-index:
-    name: Build Retrieval Index
+    name: Build and Validate Retrieval Index
     runs-on: ubuntu-latest
 
     steps:
@@ -75,7 +75,6 @@ jobs:
           echo "SECURITY_GROUP=${SECURITY_GROUP}" >> "${GITHUB_ENV}"
 
       - name: Run indexing task
-        id: run-task
         shell: bash
         run: |
           TASK_ARN="$(aws ecs run-task \
@@ -88,23 +87,21 @@ jobs:
             --output text)"
 
           if [ -z "${TASK_ARN}" ] || [ "${TASK_ARN}" = "None" ]; then
-            echo "ECS did not return a task ARN."
+            echo "ECS did not return an indexing task ARN."
             exit 1
           fi
 
-          echo "Started task: ${TASK_ARN}"
+          echo "Started indexing task: ${TASK_ARN}"
           echo "TASK_ARN=${TASK_ARN}" >> "${GITHUB_ENV}"
-          echo "task_arn=${TASK_ARN}" >> "${GITHUB_OUTPUT}"
 
       - name: Wait for indexing task
         shell: bash
         run: |
-          echo "Waiting for ${TASK_ARN}"
           aws ecs wait tasks-stopped \
             --cluster "${CLUSTER_NAME}" \
             --tasks "${TASK_ARN}"
 
-      - name: Validate indexing task
+      - name: Validate indexing task exit code
         shell: bash
         run: |
           EXIT_CODE="$(aws ecs describe-tasks \
@@ -127,14 +124,128 @@ jobs:
             exit 1
           fi
 
-      - name: Show indexing logs
-        if: always() && env.TASK_ARN != ''
+      - name: Resolve candidate version
         shell: bash
         run: |
           TASK_ID="${TASK_ARN##*/}"
+          LOG_STREAM="indexer/agentic-research-rag-indexer/${TASK_ID}"
+
+          CANDIDATE_VERSION=""
+
+          for ATTEMPT in $(seq 1 12); do
+            LOGS="$(aws logs filter-log-events \
+              --log-group-name /ecs/agentic-research-rag \
+              --log-stream-names "${LOG_STREAM}" \
+              --query 'events[*].message' \
+              --output text)"
+
+            echo "${LOGS}"
+
+            CANDIDATE_VERSION="$(printf '%s\n' "${LOGS}" \
+              | grep -oE 'Version: [0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}' \
+              | tail -n 1 \
+              | sed 's/^Version: //' || true)"
+
+            if [ -n "${CANDIDATE_VERSION}" ]; then
+              break
+            fi
+
+            echo "Candidate version not visible yet. Attempt ${ATTEMPT}/12."
+            sleep 5
+          done
+
+          if [ -z "${CANDIDATE_VERSION}" ]; then
+            echo "Could not resolve the candidate version from indexing logs."
+            exit 1
+          fi
+
+          echo "Candidate version: ${CANDIDATE_VERSION}"
+          echo "CANDIDATE_VERSION=${CANDIDATE_VERSION}" >> "${GITHUB_ENV}"
+
+      - name: Run candidate validation task
+        shell: bash
+        run: |
+          OVERRIDES="$(jq -nc \
+            --arg version "${CANDIDATE_VERSION}" \
+            '{
+              containerOverrides: [
+                {
+                  name: "agentic-research-rag-indexer",
+                  command: [
+                    "python",
+                    "-m",
+                    "agentic_research_rag.artifacts.validate_candidate",
+                    "--version",
+                    $version
+                  ]
+                }
+              ]
+            }')"
+
+          VALIDATION_TASK_ARN="$(aws ecs run-task \
+            --cluster "${CLUSTER_NAME}" \
+            --task-definition "${TASK_DEFINITION}" \
+            --launch-type FARGATE \
+            --platform-version LATEST \
+            --network-configuration "awsvpcConfiguration={subnets=[${SUBNETS}],securityGroups=[${SECURITY_GROUP}],assignPublicIp=ENABLED}" \
+            --overrides "${OVERRIDES}" \
+            --query 'tasks[0].taskArn' \
+            --output text)"
+
+          if [ -z "${VALIDATION_TASK_ARN}" ] || [ "${VALIDATION_TASK_ARN}" = "None" ]; then
+            echo "ECS did not return a validation task ARN."
+            exit 1
+          fi
+
+          echo "Started validation task: ${VALIDATION_TASK_ARN}"
+          echo "VALIDATION_TASK_ARN=${VALIDATION_TASK_ARN}" >> "${GITHUB_ENV}"
+
+      - name: Wait for candidate validation
+        shell: bash
+        run: |
+          aws ecs wait tasks-stopped \
+            --cluster "${CLUSTER_NAME}" \
+            --tasks "${VALIDATION_TASK_ARN}"
+
+      - name: Validate candidate task exit code
+        shell: bash
+        run: |
+          EXIT_CODE="$(aws ecs describe-tasks \
+            --cluster "${CLUSTER_NAME}" \
+            --tasks "${VALIDATION_TASK_ARN}" \
+            --query 'tasks[0].containers[0].exitCode' \
+            --output text)"
+
+          STOPPED_REASON="$(aws ecs describe-tasks \
+            --cluster "${CLUSTER_NAME}" \
+            --tasks "${VALIDATION_TASK_ARN}" \
+            --query 'tasks[0].stoppedReason' \
+            --output text)"
+
+          echo "Exit code: ${EXIT_CODE}"
+          echo "Stopped reason: ${STOPPED_REASON}"
+
+          if [ "${EXIT_CODE}" != "0" ]; then
+            echo "Candidate validation failed."
+            exit 1
+          fi
+
+      - name: Show validation logs
+        if: always() && env.VALIDATION_TASK_ARN != ''
+        shell: bash
+        run: |
+          TASK_ID="${VALIDATION_TASK_ARN##*/}"
 
           aws logs filter-log-events \
             --log-group-name /ecs/agentic-research-rag \
             --log-stream-names "indexer/agentic-research-rag-indexer/${TASK_ID}" \
             --query 'events[*].message' \
             --output text
+
+      - name: Show validated candidate
+        if: success()
+        shell: bash
+        run: |
+          echo "Candidate retrieval index built and validated successfully."
+          echo "Version: ${CANDIDATE_VERSION}"
+          echo "The candidate has not been promoted."
