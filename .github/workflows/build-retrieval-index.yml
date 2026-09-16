@@ -1,0 +1,140 @@
+name: Build Retrieval Index
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build-index:
+    name: Build Retrieval Index
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v6.2.4
+        with:
+          role-to-assume: arn:aws:iam::649616336579:role/agentic-rag-github-actions-role
+          aws-region: us-east-1
+          role-session-name: indexing-bootstrap-${{ github.run_id }}
+
+      - name: Assume Terraform role
+        uses: aws-actions/configure-aws-credentials@v6.2.4
+        with:
+          role-to-assume: arn:aws:iam::649616336579:role/agentic-rag-terraform-role
+          aws-region: us-east-1
+          role-chaining: true
+          role-session-name: indexing-${{ github.run_id }}
+
+      - name: Resolve indexing infrastructure
+        shell: bash
+        run: |
+          CLUSTER_NAME="agentic-research-rag-indexing-cluster"
+          TASK_DEFINITION="agentic-research-rag-indexer"
+
+          VPC_ID="$(aws ec2 describe-vpcs \
+            --filters Name=is-default,Values=true \
+            --query 'Vpcs[0].VpcId' \
+            --output text)"
+
+          SUBNETS="$(aws ec2 describe-subnets \
+            --filters Name=vpc-id,Values="${VPC_ID}" \
+            --query 'Subnets[].SubnetId' \
+            --output text | tr '\t' ',')"
+
+          SECURITY_GROUP="$(aws ec2 describe-security-groups \
+            --filters \
+              Name=vpc-id,Values="${VPC_ID}" \
+              Name=group-name,Values=agentic-research-rag-indexer-sg \
+            --query 'SecurityGroups[0].GroupId' \
+            --output text)"
+
+          if [ -z "${VPC_ID}" ] || [ "${VPC_ID}" = "None" ]; then
+            echo "Could not resolve the default VPC."
+            exit 1
+          fi
+
+          if [ -z "${SUBNETS}" ] || [ "${SUBNETS}" = "None" ]; then
+            echo "Could not resolve indexing subnets."
+            exit 1
+          fi
+
+          if [ -z "${SECURITY_GROUP}" ] || [ "${SECURITY_GROUP}" = "None" ]; then
+            echo "Could not resolve the indexing security group."
+            exit 1
+          fi
+
+          echo "CLUSTER_NAME=${CLUSTER_NAME}" >> "${GITHUB_ENV}"
+          echo "TASK_DEFINITION=${TASK_DEFINITION}" >> "${GITHUB_ENV}"
+          echo "SUBNETS=${SUBNETS}" >> "${GITHUB_ENV}"
+          echo "SECURITY_GROUP=${SECURITY_GROUP}" >> "${GITHUB_ENV}"
+
+      - name: Run indexing task
+        id: run-task
+        shell: bash
+        run: |
+          TASK_ARN="$(aws ecs run-task \
+            --cluster "${CLUSTER_NAME}" \
+            --task-definition "${TASK_DEFINITION}" \
+            --launch-type FARGATE \
+            --platform-version LATEST \
+            --network-configuration "awsvpcConfiguration={subnets=[${SUBNETS}],securityGroups=[${SECURITY_GROUP}],assignPublicIp=ENABLED}" \
+            --query 'tasks[0].taskArn' \
+            --output text)"
+
+          if [ -z "${TASK_ARN}" ] || [ "${TASK_ARN}" = "None" ]; then
+            echo "ECS did not return a task ARN."
+            exit 1
+          fi
+
+          echo "Started task: ${TASK_ARN}"
+          echo "TASK_ARN=${TASK_ARN}" >> "${GITHUB_ENV}"
+          echo "task_arn=${TASK_ARN}" >> "${GITHUB_OUTPUT}"
+
+      - name: Wait for indexing task
+        shell: bash
+        run: |
+          echo "Waiting for ${TASK_ARN}"
+          aws ecs wait tasks-stopped \
+            --cluster "${CLUSTER_NAME}" \
+            --tasks "${TASK_ARN}"
+
+      - name: Validate indexing task
+        shell: bash
+        run: |
+          EXIT_CODE="$(aws ecs describe-tasks \
+            --cluster "${CLUSTER_NAME}" \
+            --tasks "${TASK_ARN}" \
+            --query 'tasks[0].containers[0].exitCode' \
+            --output text)"
+
+          STOPPED_REASON="$(aws ecs describe-tasks \
+            --cluster "${CLUSTER_NAME}" \
+            --tasks "${TASK_ARN}" \
+            --query 'tasks[0].stoppedReason' \
+            --output text)"
+
+          echo "Exit code: ${EXIT_CODE}"
+          echo "Stopped reason: ${STOPPED_REASON}"
+
+          if [ "${EXIT_CODE}" != "0" ]; then
+            echo "Indexing task failed."
+            exit 1
+          fi
+
+      - name: Show indexing logs
+        if: always() && env.TASK_ARN != ''
+        shell: bash
+        run: |
+          TASK_ID="${TASK_ARN##*/}"
+
+          aws logs filter-log-events \
+            --log-group-name /ecs/agentic-research-rag \
+            --log-stream-names "indexer/agentic-research-rag-indexer/${TASK_ID}" \
+            --query 'events[*].message' \
+            --output text
